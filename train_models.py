@@ -101,7 +101,7 @@ def prepare_features(df, window_size=10):
 
     # Feature engineering
     baseline_gas_resistance = np.median(features[:, 3])
-    print(f"Baseline gas gas_resistance: {baseline_gas_resistance:.0f} Ω")
+    print(f"Baseline gas_resistance: {baseline_gas_resistance:.0f} Ω")
 
     gas_ratio = features[:, 3] / baseline_gas_resistance
     abs_humidity = calculate_absolute_humidity(features[:, 0], features[:, 1])

@@ -51,6 +51,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to load KAN model: {e}")
 
+    # Try to load LSTM
+    try:
+        lstm = IAQPredictor(model_type='lstm', window_size=settings.WINDOW_SIZE)
+        lstm.load_model(settings.LSTM_MODEL_PATH)
+        predictors['lstm'] = lstm
+        inference_engines['lstm'] = InferenceEngine(lstm)
+        logger.info("LSTM model loaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to load LSTM model: {e}")
+
     if not predictors:
         logger.error("No models loaded! Service will not be functional.")
     else:
@@ -168,9 +178,9 @@ async def predict_iaq(reading: SensorReading):
 
         result = engine.predict_single(
             reading.temperature,
-            reading.humidity,
+            reading.rel_humidity,
             reading.pressure,
-            reading.gas_gas_resistance
+            reading.gas_resistance
         )
 
         # Log prediction to InfluxDB if enabled and prediction was successful

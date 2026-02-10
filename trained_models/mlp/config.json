@@ -1,9 +1,23 @@
 {
-  "baseline_gas_resistance": 169424.22,
-  "trained_date": "2026-02-01T10:34:08.366943",
-  "window_size": 10,
-  "mae": 9.588971746668278,
-  "rmse": 14.413678103050447,
-  "r2": 0.892082619800522,
-  "notes": "Trained on real BSEC data with MLP architecture"
+  "model_type": "mlp",
+  "model_params": {
+    "window_size": 10,
+    "num_features": 4,
+    "device": "cpu",
+    "default_dropout": 0.2,
+    "hidden_dims": [
+      64,
+      32,
+      16
+    ],
+    "dropout": 0.2,
+    "activation": "relu",
+    "use_batch_norm": true,
+    "input_dim": 4
+  },
+  "training": {
+    "epochs": 1,
+    "lr": 0.001,
+    "batch_size": 32
+  }
 }

@@ -3,12 +3,16 @@
 # ============================================================================
 from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
+
+
 class SensorReading(BaseModel):
     temperature: float = Field(..., description="Temperature in Celsius", ge=-40, le=85)
     rel_humidity: float = Field(..., description="Relative humidity (%)", ge=0, le=100)
     pressure: float = Field(..., description="Pressure in hPa", ge=300, le=1100)
     gas_resistance: float = Field(..., description="Gas resistance in Ohms", gt=0)
     timestamp: Optional[str] = Field(None, description="ISO timestamp")
+
+
 class IAQResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     iaq: Optional[float] = Field(None, description="IAQ index (0-500)")

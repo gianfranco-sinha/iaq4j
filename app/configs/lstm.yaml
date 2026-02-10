@@ -1,0 +1,5 @@
+model_params:
+  input_size: 6
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
