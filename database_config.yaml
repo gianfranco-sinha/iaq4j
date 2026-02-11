@@ -1,0 +1,70 @@
+# ============================================================================
+# Database Configuration File for AirML
+# ============================================================================
+# This file contains database connection parameters
+# Modify these values to connect to your InfluxDB instance
+
+# InfluxDB Configuration
+influxdb:
+  # InfluxDB version and client type
+  version: "1.x"  # Options: "1.x", "2.x"
+  client_type: "influxdb"  # Options: "influxdb", "influxdb_client"
+  
+  # Connection settings
+  host: "YOUR IP ADDRESS"
+  port: 8086
+  database: "home_study_room_iaq"
+  
+  # Authentication (optional)
+  username: ""
+  password: ""
+  
+  # Connection settings
+  timeout: 60
+  
+  # Enable/disable database features
+  enabled: false  # Set to true to enable database logging/queries
+  
+  # SSL/TLS settings (optional)
+  ssl: false
+  verify_ssl: true
+  
+  # Version-specific settings
+  # InfluxDB 1.x uses DataFrameClient, 2.x uses InfluxDBClient
+  org: ""  # Required for InfluxDB 2.x
+  bucket: ""  # Required for InfluxDB 2.x
+  token: ""  # Required for InfluxDB 2.x
+  
+  # Version examples:
+  
+  # For InfluxDB 1.x (traditional):
+  # version: "1.x"
+  # client_type: "influxdb"
+  # database: "your_db_name"
+  # username: "your_user"
+  # password: "your_password"
+  
+  # For InfluxDB 2.x (cloud/v2):
+  # version: "2.x"
+  # client_type: "influxdb"
+  # org: "your_org"
+  # bucket: "your_bucket"
+  # token: "your_auth_token"
+
+# Database Operations
+database:
+  # Query settings
+  batch_size: 1000
+  max_retries: 3
+  retry_delay: 1  # seconds
+  
+  # Data retention
+  retention_policy: "autogen"
+  data_retention_days: 30
+
+# Logging Configuration
+logging:
+  # Database query logging
+  log_queries: false
+  log_performance: false
+  query_timeout_threshold: 5  # seconds

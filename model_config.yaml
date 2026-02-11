@@ -1,0 +1,77 @@
+# ============================================================================
+# Model Configuration File for AirML
+# ============================================================================
+# This file contains configurable parameters for all ML models
+# Modify these values to adjust model architecture and behavior
+
+# Global settings that apply to all models
+global:
+  # Window size for temporal models (LSTM, CNN)
+  window_size: 10
+  # Number of input features (temperature, humidity, pressure, gas_resistance)
+  num_features: 4
+  # Default device for inference (cpu/cuda)
+  device: "cpu"
+  # Dropout rate shared across models (can be overridden per model)
+  default_dropout: 0.2
+
+# MLP (Multi-Layer Perceptron) configuration
+mlp:
+  # Architecture parameters
+  hidden_dims: [64, 32, 16]    # Hidden layer dimensions
+  dropout: 0.2                  # Dropout rate (overrides global.default_dropout)
+  activation: "relu"           # Activation function (relu/tanh/sigmoid)
+  use_batch_norm: true         # Whether to use batch normalization
+  # Input parameters
+  input_dim: 4                 # Number of input features
+
+# KAN (Kolmogorov-Arnold Networks) configuration  
+kan:
+  # Architecture parameters
+  hidden_dims: [32, 16]        # Hidden layer dimensions
+  # Input parameters
+  input_dim: 4                 # Number of input features
+  # KAN-specific parameters
+  grid_size: 5                 # Grid size for KAN
+  spline_order: 3              # Spline order for KAN
+
+# LSTM (Long Short-Term Memory) configuration
+lstm:
+  # Architecture parameters
+  hidden_size: 128             # LSTM hidden state size
+  num_layers: 2                # Number of LSTM layers
+  dropout: 0.3                 # Dropout rate (overrides global.default_dropout)
+  bidirectional: true          # Whether to use bidirectional LSTM
+  # Input parameters
+  window_size: 10              # Length of input sequences (overrides global.window_size)
+  num_features: 4              # Number of input features (overrides global.num_features)
+  # Fully connected layers after LSTM
+  fc_layers: [64, 32]          # FC layer dimensions before output
+
+# CNN (Convolutional Neural Network) configuration
+cnn:
+  # Convolutional layer parameters
+  num_filters: [64, 128, 256]  # Number of filters for each conv layer
+  kernel_sizes: [3, 3, 3]      # Kernel sizes for each conv layer
+  dropout: 0.3                 # Dropout rate (overrides global.default_dropout)
+  # Input parameters  
+  window_size: 10              # Length of input sequences (overrides global.window_size)
+  num_features: 4              # Number of input features (overrides global.num_features)
+  # Fully connected layers after convolutions
+  fc_layers: [128, 64]         # FC layer dimensions before output
+
+# Training configuration (optional - for training scripts)
+training:
+  # Common training parameters
+  batch_size: 32
+  learning_rate: 0.001
+  num_epochs: 100
+  validation_split: 0.2
+  # Early stopping
+  early_stopping_patience: 10
+  min_delta: 0.001
+  # Loss function and optimizer
+  loss_function: "mse"         # mse/mae/huber
+  optimizer: "adam"            # adam/sgd/rmsprop
+  # Learning rate scheduling
+  lr_scheduler: "reduce_on_plateau"  # none/reduce_on_plateau/step/cosine

@@ -1,0 +1,22 @@
+{
+  "model_type": "lstm",
+  "model_params": {
+    "window_size": 10,
+    "num_features": 4,
+    "device": "cpu",
+    "default_dropout": 0.2,
+    "hidden_size": 128,
+    "num_layers": 2,
+    "dropout": 0.3,
+    "bidirectional": true,
+    "fc_layers": [
+      64,
+      32
+    ]
+  },
+  "training": {
+    "epochs": 1,
+    "lr": 0.001,
+    "batch_size": 32
+  }
+}

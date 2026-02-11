@@ -1,0 +1,336 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
+
+ Copyright (C) 2025 AirML Contributors
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+ The complete license text follows.
+
+                      GNU GENERAL PUBLIC LICENSE
+   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+
+        0. Definitions.
+
+           "This License" refers to version 3 of the GNU General Public License.
+
+           "Copyright" also means copyright-like laws that apply
+        to other kinds of works, such as semiconductor masks.
+        
+           "The Program" refers to any copyrightable work licensed
+        under this License.  Each licensee is addressed as "you".
+
+           "Derived Works" means any work, whether in Source Object
+        or other form, that is based upon the Program, or upon the
+        Program, or upon the Program and any translation of the Program, and
+        any modification, addition, deletion, or other modifications of the
+        Program, or any portion thereof, to create new works
+        incorporating, or otherwise merging the Program or portions thereof into
+        other works.
+
+           "Modification" means any addition to, deletion from, or change to
+        the contents or structure of the Program.
+
+           "Object form" means any form resulting from mechanical
+        transformation or translation of a Source form, including but
+        not limited to compiled object code, generated documentation,
+        and conversions to other media types.
+
+           "Source form" means the preferred form of the Program
+        for making modifications to it, including but not limited to
+        software source code, documentation source, and configuration
+        files.
+
+           "Standard Interface" means an interface that either is an official
+        standard defined by a recognized standards body, or, in the case of
+        interfaces specified for a particular programming language,
+        one that is widely used among developers working in that language.
+
+           The "System Libraries" of an executable work include
+        anything, other than the work as a whole, that (a) is included
+        in the normal form of packaging a Major Component, but which is
+        not part of that Major Component, and (b) serves only to enable use
+        of the work with that Major Component, or to implement a
+        Standard Interface for which an implementation is required to be
+        passed to the Major Component, or to execute a standardized
+        interface between the Major Component and other parts of the work.
+
+        The "Corresponding Source" for a System Library means either
+        the source code that is distributed with the System Library,
+        or a path that is available at no charge to all recipients
+        of the same Major Component and to anyone who receives the
+        System Library, under the same license conditions that apply
+        to the System Library as a whole.
+
+        An "Independent Module" is a module which is not ruled by
+        this License, and also a module which is not a System Library.
+
+        A "Major Component" means a System Library that is used
+        in creating the executable work, and that the
+        Corresponding Source for the System Library is
+        available to the user, under the same license conditions that apply
+        to the System Library as a whole.  A Major Component is the
+        essential part of the System Library.
+
+        A "User Product" is either (1) a "consumer product",
+        which means any tangible personal property which is normally
+        used for personal, family, or household purposes,
+        or (2) anything designed or sold for incorporation
+        into a "consumer product".
+
+        1. Grant of Copyright License.
+
+           The Program is licensed, free of charge, to all users
+        receiving a copy of this license, to use, modify, and
+        redistribute the Program and any derivative works, without restriction
+        subject to the following conditions:
+
+           a) You must give any other recipients of the Program a copy
+        of this license along with the Program.
+
+           b) You must cause all modified files to carry
+        prominent notices stating that You changed the files.
+
+           c) You must retain, in the Source form of any
+        Derivative Works that You distribute, all copyright,
+        trademark, patent, attribution and other notices from the Source form
+        of the Program, excluding those notices that do not pertain to
+        any part of the Derivative Works; and
+
+           d) If the Program includes interactive functionality,
+           each display of such functionality must display the
+        appropriate copyright notice.
+
+           e) If the Program includes an "instantiating" feature,
+           such functionality must display the appropriate
+        copyright notice.
+
+        f) You may not remove or alter any copyright notices that
+        appear in the Program.
+
+           A "Standard Interface" includes a body of related
+        standards that are well-defined and widely used, and
+        which specify the requirements for compliant implementations.
+
+        When the Program specifies that a "Standard Interface"
+        applies to the Program, that interface is required to be
+        implemented.
+
+           When the Program specifies that a "Standard Interface"
+        does not apply to a System Library, that library is required
+        not to be used.
+
+        The Program also specifies other terms that modify how a
+        System Library may be treated under this License.  For example,
+        if the Program specifies that a System Library may be
+        "silently" included, that is fine.
+
+        2. Grant of Patent License.
+
+           Subject to the terms and conditions of this License, each
+        contributor hereby grants you a non-exclusive, worldwide,
+        royalty-free license under his or her patent claims that
+        are infringed by the Program, to make, use, sell,
+        offer for sale, have made, modify, import, and otherwise
+        transfer the Program, where you do not convey any patent
+        rights that are exclusively licensed to the contributor,
+        and where the Program contains the entirety of the
+        contributor's patent claims.  You may make, run, have
+        made, and propagate covered works, but if you convey a
+        derivative work, it must contain the same patent license
+        notice.
+
+           When you convey a covered work, you may also
+        convey, on behalf of any of the contributors, patent
+        licenses that you receive from such contributor, which
+        must be in writing, that the contributor has granted
+        you a non-exclusive, worldwide, royalty-free license
+        under the contributor's patent claims that are infringed by
+        the contributor's contribution.
+
+        If a patent license notice is provided with the
+        Program, you may not remove or alter it.
+
+        3. No Warranty.
+
+           EXCEPT AS EXPRESSLY SET FORTH IN THE FOLLOWING
+        PARAGRAPHS, THE PROGRAM AND ANY DERIVATIVE WORKS ARE
+        PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+        EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+        WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE
+        AND NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR
+        COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+        OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+        TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+        WITH THE PROGRAM OR THE USE OR OTHER DEALINGS IN THE
+        PROGRAM.
+
+        4. Conveying Modified Source Versions.
+
+           If you modify the Program, your modified files
+        must be accompanied by a prominent notice stating that
+        you changed the files and the date of any change.
+
+           You may convey, and cause others to convey, modified
+        versions of the Program subject to the following conditions:
+
+           a) Your modified files must carry prominent notices stating
+        that you changed the files and the date of any change.
+
+           b) You may convey, and cause others to convey, modified
+        versions of the Program, provided that you also meet all of these
+        conditions:
+
+              i) You must cause any modified files to carry
+              prominent notices stating that you changed the files
+              and the date of any change.
+
+             ii) You must license the entire work, as a whole,
+              under this License to anyone who comes into contact
+              with the work.
+
+           A compilation of a covered work with other separate and
+        independent works is not a "Derivative Work" for the purposes
+        of this License if the compilation is not designed to be
+        used as a combined or larger program.
+
+           5. Application of This License to a System Library.
+
+           The System Library, as used in a Derivative Work, may be
+        included under this License if you ensure that the use of the
+        System Library in the Derivative Work does not conflict with the
+        exclusive patent rights that might be granted under this License to the
+        System Library.
+
+           If you convey a Derivative Work that contains a System
+        Library, you may also convey, and cause others to convey,
+        the System Library under this License, provided that you also meet all
+        of the following conditions:
+
+              a) The System Library must be included in the Source form
+              of the Derivative Work.
+
+              b) The System Library must retain the copyright notice
+              and the license notice from the Source form of the
+              System Library.
+
+              c) When you convey the Derivative Work, you may
+              license the System Library separately from the Derivative Work.
+
+        6. Trademarks.
+
+           This License does not grant permission to use the trade
+        names, trademarks, service marks, or product names of
+        the Licensor, except as required for reasonable and
+        customary use in describing the origin of the Program and
+        reproducing the content of the NOTICE file.
+
+        7. Disclaimer of Warranty.
+
+           UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN
+        WRITING, THE PROGRAM IS PROVIDED ON AN "AS IS" BASIS,
+        WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS
+        OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+        OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+        NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+        HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+        OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+        PROGRAM OR THE USE OR OTHER DEALINGS IN THE PROGRAM.
+
+        8. Limitation of Liability.
+
+           IN ALL CIRCUMSTANCES WHERE THE PROGRAM IS USED, THE
+        AUTHORS OR COPYRIGHT HOLDERS SHALL NOT BE LIABLE TO YOU FOR
+        ANY DAMAGES, INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL OR
+        CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO
+        USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF DATA
+        OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED
+        BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO
+        OPERATE WITH ANY OTHER PROGRAMS), EVEN IF SUCH AUTHOR OR
+        COPYRIGHT HOLDER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+        DAMAGES.
+
+        9. Additional Terms.
+
+           You are not required to accept this License, since you have
+        not signed it.  However, nothing else grants you permission to
+        modify or distribute the Program or its derivative works.
+        These actions are prohibited by law if you do not accept this
+        License.  Therefore, by modifying, copying, distributing, or
+        otherwise using the Program, you indicate your acceptance of this
+        License to do so, and all its terms and conditions for
+        copying, distributing or modifying the Program.
+
+        10. No Endorsement.
+
+           You may not use the name of the Licensor or
+        contributors to endorse or promote products derived from this
+        Program without prior written permission.  For example,
+        if the Program includes interactive functionality that
+        calls on a separate library, you must not use that
+        library's name to promote your product, and may not use
+        that library's name in advertising or publicity.
+
+        END OF TERMS AND CONDITIONS
+
+        How to Apply the GPL to Your New Programs
+
+           If you develop a new program, and you want it to be of the
+        greatest possible use to the public, we recommend making it free
+        software that everyone can redistribute and change under the terms of
+        this license.  To do so, attach the following notices to the
+        program.  It is safest to attach them to the start of each
+        source file to most effectively convey the exclusion of warranty;
+        and each file should have at least the "copyright" line and a
+        reference to where the full notice is found.
+
+           <one line to give the program's name and a brief idea of what it does.>
+           Copyright (C) 2025 AirML Contributors
+
+           This program is free software: you can redistribute it and/or modify
+           it under the terms of the GNU General Public License as published by
+           the Free Software Foundation, either version 3 of the License, or
+           (at your option) any later version.
+
+           Also add information on how to contact you by electronic and paper mail.
+
+           If the program does interactive commands, make it print a
+        short notice like this when it starts in an interactive mode:
+
+             <program>  Copyright (C) 2025 AirML Contributors
+                       This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
+                       This is free software, and you are welcome to redistribute it
+                       under certain conditions; type `show c' for details.
+
+           The hypothetical commands `show w' and `show c' should show the
+        appropriate parts of the General Public License.  Of course, your
+        program's commands might be different; for a GUI interface, you would use
+        an "about box".
+
+           You should also get your employer (if you work as a programmer) or school,
+           if any, to sign a "copyright disclaimer" for the program, if necessary.
+           For more information on this, and how to apply and follow the GPL,
+           see <https://www.gnu.org/licenses/>.
+
+        The GNU General Public License does not permit incorporating
+        your program into proprietary programs.  If your program is a
+        subroutine library, you may consider allowing it to be linked with proprietary
+        programs if you can do so while preserving the free status of your
+        program.
+
+        If you have questions about the GPL or need help with applying it,
+        see <https://www.gnu.org/licenses/>.
+
+AirML - Machine Learning Platform for Air Quality Index Prediction

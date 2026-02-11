@@ -1,0 +1,29 @@
+{
+  "model_type": "cnn",
+  "model_params": {
+    "window_size": 10,
+    "num_features": 4,
+    "device": "cpu",
+    "default_dropout": 0.2,
+    "num_filters": [
+      64,
+      128,
+      256
+    ],
+    "kernel_sizes": [
+      3,
+      3,
+      3
+    ],
+    "dropout": 0.3,
+    "fc_layers": [
+      128,
+      64
+    ]
+  },
+  "training": {
+    "epochs": 1,
+    "lr": 0.001,
+    "batch_size": 32
+  }
+}
