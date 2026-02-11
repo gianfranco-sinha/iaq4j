@@ -1,51 +1,27 @@
 # ============================================================================
 # File: app/models.py - Complete Version with All Models
 # ============================================================================
+import logging
 import torch
 import torch.nn as nn
 import numpy as np
-from efficient_kan import KAN
+from app.kan import KAN
 
+logger = logging.getLogger(__name__)
 
 class MLPRegressor(nn.Module):
     """MLP for IAQ prediction (Baseline Model)."""
 
-    def __init__(self, input_dim=None, hidden_dims=None, dropout=None, config=None):
+    def __init__(self, input_dim, hidden_dims=[64, 32, 16], dropout=0.2):
         super(MLPRegressor, self).__init__()
-
-        # Load from config if provided, otherwise use defaults
-        if config:
-            input_dim = config.get("input_dim", 4)
-            hidden_dims = config.get("hidden_dims", [64, 32, 16])
-            dropout = config.get("dropout", 0.2)
-            use_batch_norm = config.get("use_batch_norm", True)
-            activation = config.get("activation", "relu")
-        else:
-            input_dim = input_dim or 4
-            hidden_dims = hidden_dims or [64, 32, 16]
-            dropout = dropout or 0.2
-            use_batch_norm = True
-            activation = "relu"
 
         layers = []
         prev_dim = input_dim
 
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
-
-            if use_batch_norm:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-
-            # Add activation function
-            if activation == "relu":
-                layers.append(nn.ReLU())
-            elif activation == "tanh":
-                layers.append(nn.Tanh())
-            elif activation == "sigmoid":
-                layers.append(nn.Sigmoid())
-            else:
-                layers.append(nn.ReLU())  # Default to ReLU
-
+            layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout))
             prev_dim = hidden_dim
 
@@ -61,30 +37,13 @@ class CNNRegressor(nn.Module):
 
     def __init__(
         self,
-        window_size=None,
-        num_features=None,
-        num_filters=None,
-        kernel_sizes=None,
-        dropout=None,
-        config=None,
+        window_size=10,
+        num_features=6,
+        num_filters=[64, 128, 256],
+        kernel_sizes=[3, 3, 3],
+        dropout=0.3,
     ):
         super(CNNRegressor, self).__init__()
-
-        # Load from config if provided, otherwise use defaults
-        if config:
-            window_size = config.get("window_size", 10)
-            num_features = config.get("num_features", 4)
-            num_filters = config.get("num_filters", [64, 128, 256])
-            kernel_sizes = config.get("kernel_sizes", [3, 3, 3])
-            dropout = config.get("dropout", 0.3)
-            fc_layers = config.get("fc_layers", [128, 64])
-        else:
-            window_size = window_size or 10
-            num_features = num_features or 4
-            num_filters = num_filters or [64, 128, 256]
-            kernel_sizes = kernel_sizes or [3, 3, 3]
-            dropout = dropout or 0.3
-            fc_layers = [128, 64]
 
         self.window_size = window_size
         self.num_features = num_features
@@ -112,20 +71,16 @@ class CNNRegressor(nn.Module):
         # Global average pooling
         self.global_pool = nn.AdaptiveAvgPool1d(1)
 
-        # Build fully connected layers dynamically
-        fc_layer_list = []
-        prev_size = num_filters[-1]
-
-        for fc_size in fc_layers:
-            fc_layer_list.append(nn.Linear(prev_size, fc_size))
-            fc_layer_list.append(nn.ReLU())
-            fc_layer_list.append(nn.Dropout(dropout))
-            prev_size = fc_size
-
-        # Final output layer
-        fc_layer_list.append(nn.Linear(prev_size, 1))
-
-        self.fc = nn.Sequential(*fc_layer_list)
+        # Fully connected layers
+        self.fc = nn.Sequential(
+            nn.Linear(num_filters[-1], 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
+        )
 
     def forward(self, x):
         # Reshape from (batch, window_size * num_features) to (batch, num_features, window_size)
@@ -151,33 +106,14 @@ class LSTMRegressor(nn.Module):
 
     def __init__(
         self,
-        window_size=None,
-        num_features=None,
-        hidden_size=None,
-        num_layers=None,
-        dropout=None,
-        bidirectional=None,
-        config=None,
+        window_size=10,
+        num_features=6,
+        hidden_size=128,
+        num_layers=2,
+        dropout=0.3,
+        bidirectional=True,
     ):
         super(LSTMRegressor, self).__init__()
-
-        # Load from config if provided, otherwise use defaults
-        if config:
-            window_size = config.get("window_size", 10)
-            num_features = config.get("num_features", 4)
-            hidden_size = config.get("hidden_size", 128)
-            num_layers = config.get("num_layers", 2)
-            dropout = config.get("dropout", 0.3)
-            bidirectional = config.get("bidirectional", True)
-            fc_layers = config.get("fc_layers", [64, 32])
-        else:
-            window_size = window_size or 10
-            num_features = num_features or 4
-            hidden_size = hidden_size or 128
-            num_layers = num_layers or 2
-            dropout = dropout or 0.3
-            bidirectional = bidirectional if bidirectional is not None else True
-            fc_layers = [64, 32]
 
         self.window_size = window_size
         self.num_features = num_features
@@ -198,20 +134,15 @@ class LSTMRegressor(nn.Module):
         # Fully connected layers
         lstm_output_size = hidden_size * 2 if bidirectional else hidden_size
 
-        # Build fully connected layers dynamically
-        fc_layer_list = []
-        prev_size = lstm_output_size
-
-        for fc_size in fc_layers:
-            fc_layer_list.append(nn.Linear(prev_size, fc_size))
-            fc_layer_list.append(nn.ReLU())
-            fc_layer_list.append(nn.Dropout(dropout))
-            prev_size = fc_size
-
-        # Final output layer
-        fc_layer_list.append(nn.Linear(prev_size, 1))
-
-        self.fc = nn.Sequential(*fc_layer_list)
+        self.fc = nn.Sequential(
+            nn.Linear(lstm_output_size, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+        )
 
     def forward(self, x):
         # Reshape from (batch, window_size * num_features) to (batch, window_size, num_features)
@@ -239,23 +170,10 @@ class LSTMRegressor(nn.Module):
 class KANRegressor(nn.Module):
     """KAN for IAQ prediction."""
 
-    def __init__(self, input_dim=None, hidden_dims=None, config=None):
+    def __init__(self, input_dim, hidden_dims=[32, 16]):
         super(KANRegressor, self).__init__()
-
-        # Load from config if provided, otherwise use defaults
-        if config:
-            input_dim = config.get("input_dim", 4)
-            hidden_dims = config.get("hidden_dims", [32, 16])
-            grid_size = config.get("grid_size", 5)
-            spline_order = config.get("spline_order", 3)
-        else:
-            input_dim = input_dim or 4
-            hidden_dims = hidden_dims or [32, 16]
-            grid_size = 5
-            spline_order = 3
-
         layers = [input_dim] + hidden_dims + [1]
-        self.kan = KAN(layers, grid_size=grid_size, spline_order=spline_order)
+        self.kan = KAN(layers)
 
     def forward(self, x):
         return self.kan(x)
@@ -299,12 +217,11 @@ class IAQPredictor:
         import json
         import joblib
         from pathlib import Path
-        from app.config import settings
 
         model_dir = Path(model_path)
 
         try:
-            # Load config from JSON file
+            # Load config
             config_path = model_dir / "config.json"
             if not config_path.exists():
                 raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -312,70 +229,50 @@ class IAQPredictor:
             with open(config_path) as f:
                 self.config = json.load(f)
 
-            # Get model class
+            # Get model class and create instance
             if self.model_type not in self._model_registry:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 
             ModelClass = self._model_registry[self.model_type]
 
-            # Load model weights
+            # Load model weights first to get parameters
             weights_path = model_dir / "model.pt"
             if not weights_path.exists():
                 raise FileNotFoundError(f"Model weights not found: {weights_path}")
 
             model_data = torch.load(weights_path, map_location=self.device)
 
-            # Get YAML configuration for this model type
-            yaml_config = settings.get_model_config(self.model_type)
+            # Extract model parameters from saved data or config
+            model_params = self.config.get("model_params", {})
 
-            # Extract model parameters from saved data
-            saved_params = self.config.get("model_params", {})
-
-            # Merge saved parameters with YAML config (YAML takes precedence)
-            model_params = {}
-            model_params.update(saved_params)  # Start with saved params
-
-            # Override with YAML configuration
-            model_params.update(yaml_config)
-
-            # For backward compatibility, handle saved model data structure
             if isinstance(model_data, dict):
                 if self.model_type in ["mlp", "kan"]:
-                    # MLP and KAN specific parameters from saved data
-                    if "input_dim" in model_data and "input_dim" not in saved_params:
+                    # MLP and KAN specific parameters
+                    if "input_dim" in model_data:
                         model_params["input_dim"] = model_data["input_dim"]
-                    if (
-                        "hidden_dims" in model_data
-                        and "hidden_dims" not in saved_params
-                    ):
+                    if "hidden_dims" in model_data:
                         model_params["hidden_dims"] = model_data["hidden_dims"]
-                    if "dropout" in model_data and "dropout" not in saved_params:
+                    if "dropout" in model_data:
                         model_params["dropout"] = model_data["dropout"]
                 elif self.model_type in ["lstm", "cnn"]:
-                    # LSTM and CNN specific parameters from saved data
-                    if (
-                        "window_size" in model_data
-                        and "window_size" not in saved_params
-                    ):
+                    # LSTM and CNN specific parameters
+                    if "window_size" in model_data:
                         model_params["window_size"] = model_data["window_size"]
-                    if (
-                        "num_features" in model_data
-                        and "num_features" not in saved_params
-                    ):
+                    if "num_features" in model_data:
                         model_params["num_features"] = model_data["num_features"]
 
-            # Set required defaults if not present
+            # Add required parameters based on model type
             if self.model_type in ["mlp", "kan"]:
+                # Use saved input_dim if available, otherwise calculate
                 if "input_dim" not in model_params:
-                    model_params["input_dim"] = 4  # Default to 4 features
+                    model_params["input_dim"] = self.window_size * 6
             elif self.model_type in ["lstm", "cnn"]:
                 model_params.setdefault("window_size", self.window_size)
                 model_params.setdefault(
-                    "num_features", 4
-                )  # temp, humidity, pressure, gas
+                    "num_features", 6
+                )  # 4 raw + 2 engineered (gas_ratio, abs_humidity)
 
-            # Create model with configuration
-            self.model = ModelClass(config=model_params)
+            self.model = ModelClass(**model_params)
 
             # Load model weights
             if isinstance(model_data, dict) and "state_dict" in model_data:
@@ -393,7 +290,7 @@ class IAQPredictor:
             return True
 
         except Exception as e:
-            print(f"Failed to load model: {e}")
+            logger.error(f"Failed to load model: {e}")
             return False
 
     def predict(
@@ -501,30 +398,6 @@ class IAQPredictor:
                 "status": "error",
                 "message": f"Prediction failed: {str(e)}",
             }
-
-    def create_model_from_config(self) -> bool:
-        """Create a new model instance from YAML configuration (for training or fresh starts)."""
-        from app.config import settings
-
-        try:
-            # Get model class
-            if self.model_type not in self._model_registry:
-                raise ValueError(f"Unsupported model type: {self.model_type}")
-
-            ModelClass = self._model_registry[self.model_type]
-
-            # Get YAML configuration for this model type
-            model_config = settings.get_model_config(self.model_type)
-
-            # Create model with configuration
-            self.model = ModelClass(config=model_config)
-            self.model.to(self.device)
-
-            return True
-
-        except Exception as e:
-            print(f"Failed to create model from config: {e}")
-            return False
 
     def reset_buffer(self) -> None:
         """Reset the sliding window buffer."""

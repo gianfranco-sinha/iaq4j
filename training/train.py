@@ -1,8 +1,5 @@
 # training/train.py
-import argparse
-import json
 from pathlib import Path
-import yaml
 import torch
 from app.models import (
     MLPRegressor,
@@ -10,6 +7,7 @@ from app.models import (
     KANRegressor,
     CNNRegressor,
 )
+from app.config import settings
 from training.utils import load_dataset, save_artifacts
 
 MODEL_REGISTRY = {
@@ -20,25 +18,8 @@ MODEL_REGISTRY = {
 }
 
 
-def deep_update(base: dict, override: dict) -> dict:
-    """Recursively merge override into base."""
-    for k, v in override.items():
-        if isinstance(v, dict) and k in base:
-            base[k] = deep_update(base[k], v)
-        else:
-            base[k] = v
-    return base
-
-
-def load_config(base_path: Path, model_path: Path) -> dict:
-    with open(base_path) as f:
-        base_cfg = yaml.safe_load(f)
-    with open(model_path) as f:
-        model_cfg = yaml.safe_load(f)
-    return deep_update(base_cfg, model_cfg)
-
-
 def train(model_name: str, config: dict):
+    """Train a specific model type."""
     ModelCls = MODEL_REGISTRY[model_name]
 
     X_train, y_train, X_val, y_val, scaler = load_dataset(config)
@@ -60,32 +41,14 @@ def train(model_name: str, config: dict):
     save_artifacts(model, scaler, config, model_name)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", required=True, choices=MODEL_REGISTRY.keys())
-    parser.add_argument("--base-config", default="configs/base.yaml")
-    parser.add_argument("--model-config", required=True)
-    args = parser.parse_args()
-
-    config = load_config(Path(args.base_config), Path(args.model_config))
-    train(args.model, config)
-
-
 def train_single_model(
     model_type: str,
     epochs: int = 200,
     window_size: int = 10,
     num_records: int = None,
-    influx_host: str = None,
-    influx_port: int = None,
-    influx_database: str = None,
-    influx_username: str = None,
-    influx_password: str = None,
 ) -> bool:
-    """Train a single model using the new YAML configuration system."""
+    """Train a single model using the YAML configuration system."""
     try:
-        from app.config import settings
-
         # Get model configuration from YAML
         model_config = settings.get_model_config(model_type)
 
@@ -100,18 +63,31 @@ def train_single_model(
             },
         }
 
-        # Load dataset (placeholder for now)
+        # Load dataset
         X_train, y_train, X_val, y_val, scaler = load_dataset(config)
 
         # Convert to tensors
         X_train_tensor = torch.FloatTensor(X_train)
         y_train_tensor = torch.FloatTensor(y_train)
-        X_val_tensor = torch.FloatTensor(X_val)
-        y_val_tensor = torch.FloatTensor(y_val)
 
         # Create model
         ModelCls = MODEL_REGISTRY[model_type]
-        model = ModelCls(config=model_config)
+
+        # Handle different model constructors
+        if model_type == "kan":
+            input_dim = model_config.get("input_dim", 6)
+            hidden_dims = model_config.get("hidden_dims", [32, 16])
+            model = ModelCls(input_dim=input_dim, hidden_dims=hidden_dims)
+        elif model_type == "mlp":
+            input_dim = model_config.get("input_dim", 6)
+            hidden_dims = model_config.get("hidden_dims", [64, 32, 16])
+            dropout = model_config.get("dropout", 0.2)
+            model = ModelCls(
+                input_dim=input_dim, hidden_dims=hidden_dims, dropout=dropout
+            )
+        else:
+            # LSTM and CNN expect full config dict
+            model = ModelCls(**model_config)
 
         # Training setup
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -137,7 +113,3 @@ def train_single_model(
     except Exception as e:
         print(f"Error training {model_type}: {e}")
         return False
-
-
-if __name__ == "__main__":
-    main()

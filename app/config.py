@@ -161,16 +161,9 @@ class Settings(BaseSettings):
         """Get merged database configuration."""
         yaml_config = self.load_database_config()
         influx_config = yaml_config.get("influxdb", {})
-        version = influx_config.get("version", "1.x")
-
-        if version == "2.x":
-            default_client_type = "influxdb"
-        else:
-            default_client_type = "influxdb"
-
         merged_config = {
             "version": influx_config.get("version", "1.x"),
-            "client_type": influx_config.get("client_type", default_client_type),
+            "client_type": influx_config.get("client_type", "influxdb"),
             "host": influx_config.get("host", self.INFLUX_HOST),
             "port": influx_config.get("port", self.INFLUX_PORT),
             "database": influx_config.get("database", self.INFLUX_DATABASE),

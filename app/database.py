@@ -236,9 +236,9 @@ class InfluxDBManager:
                     Point("iaq_predictions")
                     .tag("model", model_type)
                     .field("temperature", float(temperature))
-                    .field("humidity", float(humidity))
+                    .field("humidity", float(rel_humidity))
                     .field("pressure", float(pressure))
-                    .field("resistance", float(resistance))
+                    .field("resistance", float(gas_resistance))
                     .field("iaq_predicted", float(iaq_predicted))
                     .time(datetime.fromtimestamp(timestamp))
                 )
@@ -256,9 +256,9 @@ class InfluxDBManager:
                         "tags": {"model": model_type},
                         "fields": {
                             "temperature": float(temperature),
-                            "humidity": float(humidity),
+                            "humidity": float(rel_humidity),
                             "pressure": float(pressure),
-                            "resistance": float(resistance),
+                            "resistance": float(gas_resistance),
                             "iaq_predicted": float(iaq_predicted),
                         },
                     }

@@ -200,11 +200,11 @@ class InferenceEngine:
 
         # Check for resistance instability
         if res_std / res_mean > 0.3:  # >30% variation
-            warnings.append("High gas gas_resistance variability")
+            warnings.append("High gas resistance variability")
 
         # Check for stuck readings
         if res_std / res_mean < 0.01:  # <1% variation
-            warnings.append("Gas gas_resistance appears stuck")
+            warnings.append("Gas resistance appears stuck")
 
         return {
             'gas_resistance_stability': {

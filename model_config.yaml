@@ -8,8 +8,8 @@
 global:
   # Window size for temporal models (LSTM, CNN)
   window_size: 10
-  # Number of input features (temperature, humidity, pressure, gas_resistance)
-  num_features: 4
+  # Number of input features (4 raw + 2 engineered: gas_ratio, abs_humidity)
+  num_features: 6
   # Default device for inference (cpu/cuda)
   device: "cpu"
   # Dropout rate shared across models (can be overridden per model)
@@ -23,14 +23,14 @@ mlp:
   activation: "relu"           # Activation function (relu/tanh/sigmoid)
   use_batch_norm: true         # Whether to use batch normalization
   # Input parameters
-  input_dim: 4                 # Number of input features
+  input_dim: 6                 # Number of input features
 
-# KAN (Kolmogorov-Arnold Networks) configuration  
+# KAN (Kolmogorov-Arnold Networks) configuration
 kan:
   # Architecture parameters
   hidden_dims: [32, 16]        # Hidden layer dimensions
   # Input parameters
-  input_dim: 4                 # Number of input features
+  input_dim: 6                 # Number of input features
   # KAN-specific parameters
   grid_size: 5                 # Grid size for KAN
   spline_order: 3              # Spline order for KAN
@@ -44,7 +44,7 @@ lstm:
   bidirectional: true          # Whether to use bidirectional LSTM
   # Input parameters
   window_size: 10              # Length of input sequences (overrides global.window_size)
-  num_features: 4              # Number of input features (overrides global.num_features)
+  num_features: 6              # Number of input features (overrides global.num_features)
   # Fully connected layers after LSTM
   fc_layers: [64, 32]          # FC layer dimensions before output
 
@@ -54,9 +54,9 @@ cnn:
   num_filters: [64, 128, 256]  # Number of filters for each conv layer
   kernel_sizes: [3, 3, 3]      # Kernel sizes for each conv layer
   dropout: 0.3                 # Dropout rate (overrides global.default_dropout)
-  # Input parameters  
+  # Input parameters
   window_size: 10              # Length of input sequences (overrides global.window_size)
-  num_features: 4              # Number of input features (overrides global.num_features)
+  num_features: 6              # Number of input features (overrides global.num_features)
   # Fully connected layers after convolutions
   fc_layers: [128, 64]         # FC layer dimensions before output
 

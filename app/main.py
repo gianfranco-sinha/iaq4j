@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 
 from app.models import IAQPredictor
-from app.inference import InferenceEngine, StreamingInference
+from app.inference import InferenceEngine
 from app.schemas import (
     SensorReading, IAQResponse, ModelInfo, HealthResponse, ModelSelection
 )
@@ -259,7 +259,7 @@ async def predict_compare(reading: SensorReading):
 
     return {
         'models': results,
-        'reading': reading.dict()
+        'reading': reading.model_dump()
     }
 
 
