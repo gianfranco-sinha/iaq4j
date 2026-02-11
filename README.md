@@ -7,6 +7,7 @@ Development guide for agentic coding agents working on the IAQ-Forge repository.
 **IAQ Forge** - An open-source, model-agnostic ML platform for time-series data. It provides the ability to train, compare, and evaluate the performance of various neural network models (MLP, KAN, LSTM, CNN) with multiple sensor data sources in generating accurate air quality index predictions.
 
 This application was originally developed to provide an open implementation of BSEC (Bosch Sensortec Environmental Sensor) IAQ indices from raw BME680 sensor data, enabling transparent evaluation and customization of ML approaches for air quality monitoring.  
+
 **Technology Stack**: Python 3.9+, FastAPI, PyTorch, InfluxDB  
 **ML Models**: MLP, KAN, LSTM, CNN for air quality prediction
 
