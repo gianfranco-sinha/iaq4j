@@ -1,6 +1,6 @@
 # IAQ-Forge
 
-Commercial ML platform for BSEC IAQ index reproduction from raw BME680 sensor data.
+This is a lightweight, open-source ML regressor for reproducing the BSEC IAQ index from raw BME680 sensor data.
 
 ## Quick Start
 
