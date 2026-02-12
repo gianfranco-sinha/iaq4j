@@ -11,19 +11,19 @@ influxdb:
   client_type: "influxdb"  # Options: "influxdb", "influxdb_client"
   
   # Connection settings
-  host: "YOUR IP ADDRESS"
+  host: "87.106.102.14"
   port: 8086
-  database: "home_study_room_iaq"
-  
+  database: "iaq_predictions"
+
   # Authentication (optional)
   username: ""
   password: ""
-  
+
   # Connection settings
   timeout: 60
-  
+
   # Enable/disable database features
-  enabled: false  # Set to true to enable database logging/queries
+  enabled: true
   
   # SSL/TLS settings (optional)
   ssl: false

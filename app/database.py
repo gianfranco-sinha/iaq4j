@@ -69,13 +69,13 @@ class InfluxDBManager:
             return False
 
     def _connect_influxdb_v1(self) -> bool:
-        """Connect to InfluxDB 1.x using DataFrameClient."""
+        """Connect to InfluxDB 1.x using InfluxDBClient."""
         if not HAS_INFLUXDB_V1:
             logger.warning("InfluxDB 1.x client not available")
             self.last_error = "InfluxDB 1.x client not available"
             return False
 
-        self.client = DataFrameClient(
+        self.client = InfluxDBClient(
             host=self.db_config.get("host"),
             port=self.db_config.get("port"),
             username=self.db_config.get("username"),
@@ -101,7 +101,7 @@ class InfluxDBManager:
             return False
 
         self.connected = True
-        self.client_type = "DataFrameClient"
+        self.client_type = "InfluxDBClient"
         return True
 
     def _connect_influxdb_v2(self) -> bool:
