@@ -1,6 +1,6 @@
 # IAQ-Forge
 
-This is a lightweight, open-source ML regressor for reproducing the BSEC IAQ index from raw BME680 sensor data.
+This is a lightweight, open-source ML regressor for reproducing the BSEC IAQ index from raw BME680 sensor data. It has been trained on BME680 sensor data
 
 ## Quick Start
 
