@@ -2,7 +2,7 @@
   "model_type": "mlp",
   "model_params": {
     "window_size": 10,
-    "num_features": 4,
+    "num_features": 6,
     "device": "cpu",
     "default_dropout": 0.2,
     "hidden_dims": [
@@ -13,11 +13,18 @@
     "dropout": 0.2,
     "activation": "relu",
     "use_batch_norm": true,
-    "input_dim": 4
+    "input_dim": 6
   },
   "training": {
-    "epochs": 1,
+    "epochs": 5,
     "lr": 0.001,
     "batch_size": 32
+  },
+  "metrics": {
+    "final_train_loss": 1.0002485513687134,
+    "final_val_loss": 0.7762942910194397,
+    "mae": 0.6841071844100952,
+    "rmse": 0.8810756802558899,
+    "r2": -0.03738269851678666
   }
 }

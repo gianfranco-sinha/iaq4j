@@ -143,6 +143,8 @@ def train_model(model, X_train, y_train, X_val, y_val, model_name, epochs=200, d
     )
 
     best_val_loss = float("inf")
+    train_losses = []
+    val_losses = []
 
     for epoch in range(epochs):
         model.train()
@@ -157,6 +159,7 @@ def train_model(model, X_train, y_train, X_val, y_val, model_name, epochs=200, d
             train_loss += loss.item()
 
         train_loss /= len(train_loader)
+        train_losses.append(train_loss)
 
         model.eval()
         val_loss = 0
@@ -168,6 +171,7 @@ def train_model(model, X_train, y_train, X_val, y_val, model_name, epochs=200, d
                 val_loss += loss.item()
 
         val_loss /= len(val_loader)
+        val_losses.append(val_loss)
         scheduler.step(val_loss)
 
         if val_loss < best_val_loss:
@@ -177,7 +181,11 @@ def train_model(model, X_train, y_train, X_val, y_val, model_name, epochs=200, d
             print(f"  Epoch [{epoch + 1}/{epochs}], Train: {train_loss:.6f}, Val: {val_loss:.6f}")
 
     print(f"  Best validation loss: {best_val_loss:.6f}")
-    return best_val_loss
+    return {
+        "best_val_loss": best_val_loss,
+        "train_losses": train_losses,
+        "val_losses": val_losses,
+    }
 
 
 def evaluate_model(model, X_val, y_val, target_scaler, device=None):
@@ -201,9 +209,28 @@ def evaluate_model(model, X_val, y_val, target_scaler, device=None):
     }
 
 
+def save_training_history(model_type, epochs, train_losses, val_losses, metrics, output_dir):
+    """Save epoch-level training history and final metrics to JSON."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    history = {
+        "model_type": model_type,
+        "trained_date": pd.Timestamp.now().isoformat(),
+        "epochs": epochs,
+        "train_loss": train_losses,
+        "val_loss": val_losses,
+        "metrics": {k: float(v) for k, v in metrics.items()},
+    }
+
+    with open(output_dir / "training_history.json", "w") as f:
+        json.dump(history, f, indent=2)
+
+
 def save_trained_model(
     model, feature_scaler, target_scaler, model_type,
     window_size, baseline_gas_resistance, model_dir, metrics,
+    training_history=None,
 ):
     """Save a fully trained model with scalers, config, and checkpoint."""
     os.makedirs(model_dir, exist_ok=True)
@@ -235,6 +262,16 @@ def save_trained_model(
     }
 
     torch.save(checkpoint, f"{model_dir}/model.pt")
+
+    if training_history is not None:
+        save_training_history(
+            model_type=model_type,
+            epochs=len(training_history["train_losses"]),
+            train_losses=training_history["train_losses"],
+            val_losses=training_history["val_losses"],
+            metrics=metrics,
+            output_dir=model_dir,
+        )
 
     print(f"\n  Saved {model_type.upper()}: MAE={metrics['mae']:.2f}, R2={metrics['r2']:.4f}")
 
@@ -307,7 +344,17 @@ def load_dataset(config):
     return X_train, y_train, X_val, y_val, scaler
 
 
-def save_artifacts(model, scaler, config, model_name):
+def save_artifacts(model, scaler, config, model_name, training_history=None):
     """Save model artifacts using save_model (iaqforge CLI path)."""
     output_dir = Path("trained_models")
     save_model(model, model_name, output_dir, config, scaler)
+
+    if training_history is not None:
+        save_training_history(
+            model_type=model_name,
+            epochs=len(training_history["train_losses"]),
+            train_losses=training_history["train_losses"],
+            val_losses=training_history["val_losses"],
+            metrics=training_history.get("metrics", {}),
+            output_dir=output_dir / model_name,
+        )

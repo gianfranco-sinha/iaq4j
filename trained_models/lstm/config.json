@@ -2,7 +2,7 @@
   "model_type": "lstm",
   "model_params": {
     "window_size": 10,
-    "num_features": 4,
+    "num_features": 6,
     "device": "cpu",
     "default_dropout": 0.2,
     "hidden_size": 128,
@@ -15,8 +15,15 @@
     ]
   },
   "training": {
-    "epochs": 1,
+    "epochs": 200,
     "lr": 0.001,
     "batch_size": 32
+  },
+  "metrics": {
+    "final_train_loss": 0.12302391976118088,
+    "final_val_loss": 2.002037763595581,
+    "mae": 0.9875690340995789,
+    "rmse": 1.4149338006973267,
+    "r2": -1.959302280120942
   }
 }

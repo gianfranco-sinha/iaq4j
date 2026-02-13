@@ -2,7 +2,7 @@
   "model_type": "cnn",
   "model_params": {
     "window_size": 10,
-    "num_features": 4,
+    "num_features": 6,
     "device": "cpu",
     "default_dropout": 0.2,
     "num_filters": [
@@ -22,8 +22,15 @@
     ]
   },
   "training": {
-    "epochs": 1,
+    "epochs": 200,
     "lr": 0.001,
     "batch_size": 32
+  },
+  "metrics": {
+    "final_train_loss": 0.11300791054964066,
+    "final_val_loss": 1.2553081512451172,
+    "mae": 0.928467869758606,
+    "rmse": 1.1204053163528442,
+    "r2": 0.014161345110802914
   }
 }

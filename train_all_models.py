@@ -52,30 +52,31 @@ if __name__ == "__main__":
 
     # MLP (Baseline)
     mlp = MLPRegressor(input_dim=input_dim, hidden_dims=[64, 32, 16])
-    train_model(mlp, X_train, y_train, X_val, y_val, "MLP (Baseline)", epochs=200)
+    mlp_history = train_model(mlp, X_train, y_train, X_val, y_val, "MLP (Baseline)", epochs=200)
     mlp_metrics = evaluate_model(mlp, X_val, y_val, target_scaler)
 
     # CNN
     cnn = CNNRegressor(window_size=WINDOW_SIZE, num_features=6)
-    train_model(cnn, X_train, y_train, X_val, y_val, "CNN", epochs=200)
+    cnn_history = train_model(cnn, X_train, y_train, X_val, y_val, "CNN", epochs=200)
     cnn_metrics = evaluate_model(cnn, X_val, y_val, target_scaler)
 
     # KAN
     kan = KANRegressor(input_dim=input_dim, hidden_dims=[32, 16])
-    train_model(kan, X_train, y_train, X_val, y_val, "KAN", epochs=200)
+    kan_history = train_model(kan, X_train, y_train, X_val, y_val, "KAN", epochs=200)
     kan_metrics = evaluate_model(kan, X_val, y_val, target_scaler)
 
     # Save models
     print("\n[5/5] Saving models...")
     print("-" * 70)
-    for model, name, metrics in [
-        (mlp, "mlp", mlp_metrics),
-        (cnn, "cnn", cnn_metrics),
-        (kan, "kan", kan_metrics),
+    for model, name, metrics, history in [
+        (mlp, "mlp", mlp_metrics, mlp_history),
+        (cnn, "cnn", cnn_metrics, cnn_history),
+        (kan, "kan", kan_metrics, kan_history),
     ]:
         save_trained_model(
             model, feature_scaler, target_scaler, name,
             WINDOW_SIZE, baseline_gas_resistance, f"trained_models/{name}", metrics,
+            training_history=history,
         )
 
     client.close()

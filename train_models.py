@@ -60,12 +60,12 @@ if __name__ == "__main__":
     input_dim = WINDOW_SIZE * 6  # 4 raw + 2 engineered features
 
     mlp = MLPRegressor(input_dim=input_dim, hidden_dims=[64, 32, 16])
-    train_model(mlp, X_train, y_train, X_val, y_val, "MLP", epochs=200)
+    mlp_history = train_model(mlp, X_train, y_train, X_val, y_val, "MLP", epochs=200)
     mlp_metrics = evaluate_model(mlp, X_val, y_val, target_scaler)
 
     print("-" * 70)
     kan = KANRegressor(input_dim=input_dim, hidden_dims=[32, 16])
-    train_model(kan, X_train, y_train, X_val, y_val, "KAN", epochs=200)
+    kan_history = train_model(kan, X_train, y_train, X_val, y_val, "KAN", epochs=200)
     kan_metrics = evaluate_model(kan, X_val, y_val, target_scaler)
 
     # Save models
@@ -74,10 +74,12 @@ if __name__ == "__main__":
     save_trained_model(
         mlp, feature_scaler, target_scaler, "mlp",
         WINDOW_SIZE, baseline_gas_resistance, "trained_models/mlp", mlp_metrics,
+        training_history=mlp_history,
     )
     save_trained_model(
         kan, feature_scaler, target_scaler, "kan",
         WINDOW_SIZE, baseline_gas_resistance, "trained_models/kan", kan_metrics,
+        training_history=kan_history,
     )
 
     client.close()
