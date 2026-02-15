@@ -105,8 +105,34 @@ class Settings(BaseSettings):
             "min_samples": 100,
             "lr_scheduler_patience": 10,
             "lr_scheduler_factor": 0.5,
+            "tensorboard_enabled": True,
+            "tensorboard_log_dir": "runs",
+            "tensorboard_histogram_freq": 50,
         }
         defaults.update(config.get("training", {}))
+        return defaults
+
+    def get_sensor_config(self) -> Dict[str, Any]:
+        """Get sensor configuration with defaults (BME680 datasheet ranges)."""
+        config = self.load_model_config()
+        defaults = {
+            "type": "bme680",
+            "features": ["temperature", "rel_humidity", "pressure", "gas_resistance"],
+            "target": "iaq",
+            "valid_ranges": {
+                "temperature": [-40, 85],
+                "rel_humidity": [0, 100],
+                "pressure": [300, 1100],
+                "gas_resistance": [1000, 2000000],
+                "iaq_accuracy": [2, 3],
+            },
+        }
+        sensor_cfg = config.get("sensor", {})
+        for key in ("type", "features", "target"):
+            if key in sensor_cfg:
+                defaults[key] = sensor_cfg[key]
+        if "valid_ranges" in sensor_cfg:
+            defaults["valid_ranges"].update(sensor_cfg["valid_ranges"])
         return defaults
 
     def get_model_config(self, model_type: str) -> Dict[str, Any]:

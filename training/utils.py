@@ -32,6 +32,45 @@ def create_sliding_windows(features, targets, window_size=10):
     return np.array(windows_X), np.array(windows_y)
 
 
+def find_contiguous_segments(index, max_gap_factor=2.0):
+    """Find contiguous segments in a DatetimeIndex by detecting time gaps.
+
+    A gap is defined as a delta exceeding max_gap_factor * median_delta.
+
+    Returns:
+        segments: list of (start, end) index pairs into the original array
+        gap_info: dict with gap detection metadata
+    """
+    import pandas as pd
+
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        return [(0, len(index))], {"gaps_found": 0, "segments": 1, "skipped": True}
+
+    deltas = np.diff(index.values).astype("timedelta64[s]").astype(float)
+    median_delta = np.median(deltas)
+    threshold = median_delta * max_gap_factor
+
+    gap_mask = deltas > threshold
+    gap_indices = np.where(gap_mask)[0] + 1  # index of first reading after gap
+
+    # Build segment boundaries
+    boundaries = [0] + gap_indices.tolist() + [len(index)]
+    segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+
+    gap_info = {
+        "gaps_found": int(gap_mask.sum()),
+        "segments": len(segments),
+        "median_interval_seconds": float(median_delta),
+        "gap_threshold_seconds": float(threshold),
+    }
+
+    if gap_mask.any():
+        gap_sizes = deltas[gap_mask]
+        gap_info["largest_gap_seconds"] = float(gap_sizes.max())
+
+    return segments, gap_info
+
+
 def calculate_absolute_humidity(temperature, rel_humidity):
     """Calculate absolute humidity (g/m^3) from temperature (C) and relative humidity (%)."""
     a, b = 17.27, 237.7
@@ -43,10 +82,22 @@ def train_model(
     model, X_train, y_train, X_val, y_val, model_name,
     epochs=200, device=None, batch_size=32, learning_rate=0.001,
     lr_scheduler_patience=10, lr_scheduler_factor=0.5,
+    log_dir=None, histogram_freq=50,
 ):
-    """Train a model with DataLoader, LR scheduler, and validation tracking."""
+    """Train a model with DataLoader, LR scheduler, and validation tracking.
+
+    Args:
+        log_dir: If set, write TensorBoard events (scalars, LR, weight histograms).
+        histogram_freq: Log weight histograms every N epochs (0 to disable).
+    """
     if device is None:
         device = get_device()
+
+    # ── TensorBoard setup ─────────────────────────────────────────────
+    writer = None
+    if log_dir is not None:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir=log_dir)
 
     print(f"\nTraining {model_name} on {device}...")
     model = model.to(device)
@@ -104,6 +155,22 @@ def train_model(
 
         if (epoch + 1) % 20 == 0:
             print(f"  Epoch [{epoch + 1}/{epochs}], Train: {train_loss:.6f}, Val: {val_loss:.6f}")
+
+        # ── TensorBoard logging ───────────────────────────────────────
+        if writer is not None:
+            writer.add_scalar("Loss/train", train_loss, epoch)
+            writer.add_scalar("Loss/val", val_loss, epoch)
+            writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
+
+            if histogram_freq > 0 and (epoch + 1) % histogram_freq == 0:
+                for name, param in model.named_parameters():
+                    writer.add_histogram(f"Weights/{name}", param, epoch)
+                    if param.grad is not None:
+                        writer.add_histogram(f"Gradients/{name}", param.grad, epoch)
+
+    if writer is not None:
+        writer.flush()
+        writer.close()
 
     print(f"  Best validation loss: {best_val_loss:.6f}")
     return {

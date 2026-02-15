@@ -60,6 +60,19 @@ cnn:
   # Fully connected layers after convolutions
   fc_layers: [128, 64]         # FC layer dimensions before output
 
+# Sensor configuration — valid ranges for outlier filtering during preprocessing
+sensor:
+  type: bme680
+  # Column names — single source of truth for pipeline field references
+  features: [temperature, rel_humidity, pressure, gas_resistance]
+  target: iaq
+  valid_ranges:
+    temperature: [-40, 85]           # °C (BME680 full operating range)
+    rel_humidity: [0, 100]           # % r.H.
+    pressure: [300, 1100]            # hPa
+    gas_resistance: [1000, 2000000]  # Ohm (<1kΩ = sensor fault, >2MΩ = unreasonable)
+    iaq_accuracy: [2, 3]             # BSEC accuracy (0=unreliable, 1=low, 2=medium, 3=high)
+
 # Training configuration — read by TrainingPipeline and train_model()
 training:
   epochs: 200
@@ -71,3 +84,7 @@ training:
   # LR scheduler (ReduceLROnPlateau)
   lr_scheduler_patience: 10
   lr_scheduler_factor: 0.5
+  # TensorBoard
+  tensorboard_enabled: true          # write TensorBoard events during training
+  tensorboard_log_dir: "runs"        # base directory for TensorBoard logs
+  tensorboard_histogram_freq: 50     # log weight/gradient histograms every N epochs (0 = off)
