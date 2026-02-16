@@ -256,11 +256,13 @@ class IAQPredictor:
         self.window_size: int = window_size
         self.model_path: str = model_path
         self.model = None  # Type: torch.nn.Module
-        self.scaler = None  # Type: sklearn.base.BaseEstimator
+        self.feature_scaler = None  # StandardScaler for 6 engineered features
+        self.target_scaler = None  # MinMaxScaler for IAQ target
         self.config = None  # Type: dict
         self.device: str = "cpu"
+        self.baseline_gas_resistance: float = None
 
-        # Sliding window buffer for temporal data
+        # Sliding window buffer for all models (all use windowed input)
         self.buffer: list = []
 
         self._model_registry = MODEL_REGISTRY
@@ -335,16 +337,45 @@ class IAQPredictor:
             self.model.to(self.device)
             self.model.eval()
 
-            # Load scaler if available
-            scaler_path = model_dir / "scaler.pkl"
-            if scaler_path.exists():
-                self.scaler = joblib.load(scaler_path)
+            # Load scalers
+            feature_scaler_path = model_dir / "feature_scaler.pkl"
+            target_scaler_path = model_dir / "target_scaler.pkl"
+            if feature_scaler_path.exists():
+                self.feature_scaler = joblib.load(feature_scaler_path)
+            if target_scaler_path.exists():
+                self.target_scaler = joblib.load(target_scaler_path)
+
+            # Load baseline gas resistance from config
+            self.baseline_gas_resistance = self.config.get("baseline_gas_resistance")
+
+            # Read window_size from config if saved
+            if "window_size" in self.config:
+                self.window_size = self.config["window_size"]
 
             return True
 
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             return False
+
+    def _engineer_features(
+        self, temperature: float, rel_humidity: float,
+        pressure: float, gas_resistance: float,
+    ) -> np.ndarray:
+        """Build 6-feature vector: 4 raw + gas_ratio + abs_humidity."""
+        from training.utils import calculate_absolute_humidity
+
+        baseline = self.baseline_gas_resistance or gas_resistance
+        gas_ratio = gas_resistance / baseline
+
+        abs_humidity = calculate_absolute_humidity(
+            np.array([temperature]), np.array([rel_humidity])
+        )[0]
+
+        return np.array([
+            temperature, rel_humidity, pressure, gas_resistance,
+            gas_ratio, abs_humidity,
+        ])
 
     def predict(
         self,
@@ -353,63 +384,54 @@ class IAQPredictor:
         pressure: float,
         gas_resistance: float,
     ) -> dict:
-        """
-        Predict IAQ from sensor readings.
+        """Predict IAQ from sensor readings.
 
-        Args:
-            temperature: Temperature in Celsius
-            rel_humidity: Relative humidity in %
-            pressure: Pressure in hPa
-            gas_resistance: Gas resistance in Ohms
-
-        Returns:
-            Dictionary with prediction results
+        All model types use the same flow:
+        1. Engineer 6 features (4 raw + gas_ratio + abs_humidity)
+        2. Buffer readings until window is full
+        3. Flatten window, scale, run model, inverse-scale output
         """
         if self.model is None:
             return {"iaq": None, "status": "error", "message": "Model not loaded"}
 
         try:
-            # Create feature vector
-            features = np.array([[temperature, rel_humidity, pressure, gas_resistance]])
+            # Step 1: engineer 6 features
+            features_6 = self._engineer_features(
+                temperature, rel_humidity, pressure, gas_resistance
+            )
 
-            # Apply scaler if available
-            if self.scaler is not None:
-                features = self.scaler.transform(features)
+            # Step 2: buffer (all models use windowed input)
+            self.buffer.append(features_6)
+            if len(self.buffer) > self.window_size:
+                self.buffer.pop(0)
 
-            # Convert to tensor
-            features_tensor = torch.FloatTensor(features).to(self.device)
+            if len(self.buffer) < self.window_size:
+                return {
+                    "iaq": None,
+                    "status": "buffering",
+                    "buffer_size": len(self.buffer),
+                    "required": self.window_size,
+                    "message": f"Collecting data... {len(self.buffer)}/{self.window_size}",
+                }
 
-            # Handle temporal models with sliding window
-            if self.model_type in ["lstm", "cnn"]:
-                # Add to buffer
-                self.buffer.append(features[0])
+            # Step 3: flatten window → scale → predict → inverse-scale
+            window_flat = np.array(self.buffer).flatten().reshape(1, -1)
 
-                # Maintain window size
-                if len(self.buffer) > self.window_size:
-                    self.buffer.pop(0)
+            if self.feature_scaler is not None:
+                window_flat = self.feature_scaler.transform(window_flat)
 
-                # Check if we have enough data
-                if len(self.buffer) < self.window_size:
-                    return {
-                        "iaq": None,
-                        "status": "buffering",
-                        "buffer_size": len(self.buffer),
-                        "required": self.window_size,
-                        "message": f"Collecting data... {len(self.buffer)}/{self.window_size}",
-                    }
+            features_tensor = torch.FloatTensor(window_flat).to(self.device)
 
-                # Create windowed input
-                window_data = np.array(self.buffer)
-                features_tensor = (
-                    torch.FloatTensor(window_data.flatten())
-                    .unsqueeze(0)
-                    .to(self.device)
-                )
-
-            # Make prediction
             with torch.no_grad():
                 prediction = self.model(features_tensor)
-                iaq_value = float(prediction.cpu().numpy()[0, 0])
+                scaled_value = prediction.cpu().numpy()
+
+            if self.target_scaler is not None:
+                iaq_value = float(
+                    self.target_scaler.inverse_transform(scaled_value)[0, 0]
+                )
+            else:
+                iaq_value = float(scaled_value[0, 0])
 
             # Clamp to valid IAQ range
             iaq_value = max(0, min(500, iaq_value))
@@ -437,12 +459,8 @@ class IAQPredictor:
                     "pressure": pressure,
                     "gas_resistance": gas_resistance,
                 },
-                "buffer_size": len(self.buffer)
-                if self.model_type in ["lstm", "cnn"]
-                else None,
-                "required": self.window_size
-                if self.model_type in ["lstm", "cnn"]
-                else None,
+                "buffer_size": len(self.buffer),
+                "required": self.window_size,
             }
 
         except Exception as e:
