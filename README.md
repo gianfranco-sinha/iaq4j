@@ -1,4 +1,4 @@
-# IAQ-Forge
+# iaq4j
 
 This is a lightweight, open-source ML regressor for reproducing the BSEC IAQ index from raw BME680 sensor data. It has been trained on BME680 sensor data. This application provides a platform for evaluating and comparing the accuracy and performance of various regressor models for time-series data
 
@@ -9,7 +9,7 @@ This is a lightweight, open-source ML regressor for reproducing the BSEC IAQ ind
 ./setup.sh
 
 # Train models
-./venv/bin/python -m iaqforge train --model all --epochs 50
+./venv/bin/python -m iaq4j train --model all --epochs 50
 
 # Start API server  
 ./venv/bin/python -m app.main --reload
@@ -37,7 +37,7 @@ This is a lightweight, open-source ML regressor for reproducing the BSEC IAQ ind
 
 ## Configuration
 
-iaqforge uses YAML configuration files for flexible setup:
+iaq4j uses YAML configuration files for flexible setup:
 
 ### Model Configuration (`model_config.yaml`)
 - Neural network architecture parameters

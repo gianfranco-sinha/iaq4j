@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-IAQ-Forge — ML platform for indoor air quality prediction. **Scope: any indoor air quality sensor, any indoor IAQ standard, ML-driven prediction.** Trains and serves MLP, KAN, LSTM, and CNN models. Python 3.9+, FastAPI, PyTorch, InfluxDB. Default sensor: BME680. Default standard: BSEC IAQ.
+iaq4j — ML platform for indoor air quality prediction. **Scope: any indoor air quality sensor, any indoor IAQ standard, ML-driven prediction.** Trains and serves MLP, KAN, LSTM, and CNN models. Python 3.9+, FastAPI, PyTorch, InfluxDB. Default sensor: BME680. Default standard: BSEC IAQ.
 
 ## Commands
 
@@ -12,17 +12,18 @@ IAQ-Forge — ML platform for indoor air quality prediction. **Scope: any indoor
 # Run dev server
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# Train models (CLI — uses dummy data via load_dataset())
-python -m iaqforge train --model mlp --epochs 200
-python -m iaqforge train --model all --epochs 50
-python -m iaqforge list
+# Train models (CLI — uses synthetic data by default)
+python -m iaq4j train --model mlp --epochs 200
+python -m iaq4j train --model all --epochs 50
+python -m iaq4j train --model mlp --data-source influxdb  # real data
+python -m iaq4j list
 
 # Train from real InfluxDB data (standalone scripts)
 python train_models.py          # MLP + KAN
 python train_all_models.py      # MLP + CNN + KAN
 
 # Create untrained dummy models for dev/testing
-python create_dummy_models.py
+python training/create_dummy_models.py
 
 # Integration test (sends simulated sensor readings to running server)
 python test_client.py
@@ -33,8 +34,8 @@ python test_client.py
 ## Architecture
 
 **Two training paths** — this is the most important thing to understand:
-1. `python -m iaqforge` CLI → `iaqforge/__main__.py` → `iaqforge/model_trainer.py` → `training/train.py:train_single_model()` — uses **dummy data** via `training/utils.load_dataset()`
-2. `train_models.py` / `train_all_models.py` (standalone scripts) → `training/utils.fetch_training_data()` — fetches **real data from InfluxDB**, trains with `training/utils.train_model()`
+1. `python -m iaq4j` CLI → `iaq4j/__main__.py` → `iaq4j/model_trainer.py` → `training/train.py:train_single_model()` → `training/pipeline.py:TrainingPipeline` — uses `SyntheticSource` by default or `InfluxDBSource` via `--data-source influxdb`
+2. `train_models.py` / `train_all_models.py` (standalone scripts) → `training/utils.train_model()` — fetches **real data from InfluxDB**
 
 Both paths save artifacts to `trained_models/{model_type}/` (model.pt, config.json, optional scaler.pkl files).
 

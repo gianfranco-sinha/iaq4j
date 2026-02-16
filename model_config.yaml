@@ -1,5 +1,5 @@
 # ============================================================================
-# Model Configuration File for IAQ-Forge
+# Model Configuration File for iaq4j
 # ============================================================================
 # Scope: Any indoor air quality sensor, any indoor IAQ standard, ML-driven
 # prediction.  Modify these values to adjust model architecture and behavior.

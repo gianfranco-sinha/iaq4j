@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
         logger.error(
             "No trained models found. The service will start in degraded mode — "
             "all prediction endpoints will return 503.\n"
-            "  Train models with:  python -m iaqforge train --model mlp --epochs 200\n"
+            "  Train models with:  python -m iaq4j train --model mlp --epochs 200\n"
             "  Or create dummies:  python training/create_dummy_models.py"
         )
     else:
@@ -174,7 +174,7 @@ async def predict_iaq(reading: SensorReading):
         if not predictors:
             raise HTTPException(
                 status_code=503,
-                detail="No trained models available. Train with: python -m iaqforge train --model mlp",
+                detail="No trained models available. Train with: python -m iaq4j train --model mlp",
             )
         raise HTTPException(
             status_code=503,

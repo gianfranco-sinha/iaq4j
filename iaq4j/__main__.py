@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-AirML - CLI Training Module
+iaq4j - CLI Training Module
 
 Usage:
-    python -m airml train --model mlp
-    python -m airml train --model kan --epochs 100
-    python -m airml train --model all
+    python -m iaq4j train --model mlp
+    python -m iaq4j train --model kan --epochs 100
+    python -m iaq4j train --model all
 
 Supported models: mlp, kan, lstm, cnn, all
 """
@@ -18,13 +18,13 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from iaqforge.model_trainer import ModelTrainer
+from iaq4j.model_trainer import ModelTrainer
 
 
 def create_parser():
     """Create command line argument parser."""
     parser = argparse.ArgumentParser(
-        description="IAQForge CLI - Model Training and Data Management"
+        description="iaq4j CLI - Model Training and Data Management"
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 

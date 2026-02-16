@@ -1,13 +1,13 @@
 # AGENTS.md
 
-Development guide for agentic coding agents working on IAQForge repository.
+Development guide for agentic coding agents working on the iaq4j repository.
 
 ## Project Overview
 
-**IAQ Forge** - An open source, model agnostic ML platform for time series data. It provides the ability to train, compare, and evaluate the performance of various neural network models (MLP, KAN, LSTM, CNN) with multiple sensor data sources in generating accurate air quality index predictions.
+**iaq4j** — ML platform for indoor air quality prediction. **Scope: any indoor air quality sensor, any indoor IAQ standard, ML-driven prediction.** Trains and serves MLP, KAN, LSTM, and CNN models. Default sensor: BME680. Default standard: BSEC IAQ.
 
-This platform was originally developed to provide an open implementation of BSEC (Bosch Sensortec Environmental Sensor) IAQ indices from raw BME680 sensor data, enabling transparent evaluation and customization of ML approaches for air quality monitoring.  
-**Technology Stack**: Python 3.9+, FastAPI, PyTorch, InfluxDB  
+Originally developed to reproduce BSEC IAQ indices from raw BME680 sensor data. Now sensor-agnostic and IAQ-standard-agnostic via `SensorProfile` and `IAQStandard` abstractions (`app/profiles.py`).
+**Technology Stack**: Python 3.9+, FastAPI, PyTorch, InfluxDB
 **ML Models**: MLP, KAN, LSTM, CNN for air quality prediction
 
 ## Development Environment Setup
@@ -55,17 +55,17 @@ open http://localhost:8000/docs
 python test_client.py
 
 # Train models via CLI (RECOMMENDED)
-python3 -m iaqforge train --model mlp --epochs 100
-python3 -m iaqforge train --model lstm --epochs 200
-python3 -m iaqforge train --model all --epochs 50
+python3 -m iaq4j train --model mlp --epochs 100
+python3 -m iaq4j train --model lstm --epochs 200
+python3 -m iaq4j train --model all --epochs 50
 
 # List available models
-python3 -m iaqforge list
+python3 -m iaq4j list
 
-# Legacy training scripts (if needed)
-python train_models.py  # Single model training
-python train_all_models.py  # All models
-python create_dummy_models.py  # Dummy models for testing
+# Legacy training scripts (fetch from InfluxDB directly)
+python train_models.py          # MLP + KAN
+python train_all_models.py      # MLP + CNN + KAN
+python training/create_dummy_models.py  # Dummy models for testing
 ```
 
 ### Single Test Execution
@@ -128,20 +128,16 @@ from app.schemas import SensorReading, IAQResponse
 ```python
 def predict(
     self,
-    temperature: float,
-    rel_humidity: float,
-    pressure: float,
-    gas_resistance: float,
+    readings: dict = None,
+    **kwargs,
 ) -> dict:
     """
     Predict IAQ from sensor readings.
-    
+
     Args:
-        temperature: Temperature in Celsius
-        rel_humidity: Relative humidity in %
-        pressure: Pressure in hPa
-        gas_resistance: Gas resistance in Ohms
-    
+        readings: Dict of sensor readings, e.g. {"temperature": 22, "rel_humidity": 55,
+                  "pressure": 1013, "voc_resistance": 85000}
+
     Returns:
         Dictionary with prediction results
     """
@@ -181,18 +177,24 @@ except Exception as e:
 # Global settings
 global:
   window_size: 10
-  num_features: 4
+  num_features: 6   # 4 raw + 2 engineered (profile-driven)
   default_dropout: 0.2
+
+# Sensor and IAQ standard selection
+sensor:
+  type: bme680
+iaq_standard:
+  type: bsec
 
 # MLP configuration
 mlp:
   hidden_dims: [64, 32, 16]
   dropout: 0.2
-  input_dim: 4
+  input_dim: 6
   activation: "relu"
   use_batch_norm: true
 
-# LSTM configuration  
+# LSTM configuration
 lstm:
   hidden_size: 128
   num_layers: 2
@@ -217,7 +219,7 @@ influxdb:
   version: "1.x"
   host: "localhost"
   port: 8086
-  database: "iaqforge_data"
+  database: "iaq4j_data"
   username: "admin"
   password: "secure_password"
   enabled: true
@@ -255,7 +257,7 @@ pip install influxdb-client==1.38.0
 ## Build/Lint/Test Commands
 ```bash
 # Start development server with auto-reload
-./venv/bin/python -m iaqforge main --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Health check
 curl http://localhost:8000/health
@@ -264,33 +266,23 @@ curl http://localhost:8000/health
 open http://localhost:8000/docs
 
 # Run integration test client (simulates sensor data)
-./venv/bin/python test_client.py
+python test_client.py
 
 # Train models via CLI (RECOMMENDED)
-./venv/bin/python -m iaqforge train --model mlp --epochs 100
-./venv/bin/python -m iaqforge train --model lstm --epochs 200
-./venv/bin/python -m iaqforge train --model kan --epochs 100
-./venv/bin/python -m iaqforge train --model all --epochs 50
+python -m iaq4j train --model mlp --epochs 100
+python -m iaq4j train --model lstm --epochs 200
+python -m iaq4j train --model all --epochs 50
+python -m iaq4j train --model mlp --data-source influxdb  # real data
 
 # List available models
-./venv/bin/python -m iaqforge list
+python -m iaq4j list
 ```
 
 ### Single Test Execution
 ```bash
-# Run individual test files (if pytest is enabled)
-pytest test_file.py::test_function -v
-pytest tests/ -k "test_name_pattern" -v
-
-# Integration testing (recommended approach)
-python -c "
-import sys
-sys.path.append('.')
-from app.models import IAQPredictor
-predictor = IAQPredictor()
-result = predictor.predict_single(20.0, 60.0, 1013.25, 85000.0)
-print(f'Test result: {result}')
-"
+# No formal pytest suite currently exists
+# Integration testing:
+python test_client.py
 ```
 
 #### Loading Configuration:
@@ -315,7 +307,7 @@ print(f"Database enabled: {db_config['enabled']}")
 - Models saved with `config.json` metadata and `model.pt` weights
 
 ### CLI Integration
-- Use `python3 -m iaqforge` for training commands
+- Use `python3 -m iaq4j` for training commands
 - Supports individual models: `--model mlp|kan|lstm|cnn`
 - Supports batch training: `--model all`
 - Configurable epochs and window size
@@ -323,29 +315,33 @@ print(f"Database enabled: {db_config['enabled']}")
 ## File Structure
 
 ```
-app/                    # Main FastAPI application
-├── main.py            # FastAPI routes and application entry
-├── config.py          # Settings using Pydantic Settings + YAML config
-├── models.py          # PyTorch model definitions (MLP, KAN, LSTM, CNN)
-├── schemas.py         # Pydantic data models for API
-├── inference.py       # Inference engine logic
-└── database.py        # InfluxDB connection management
+app/                        # Main FastAPI application
+├── main.py                # FastAPI routes and application entry
+├── config.py              # Settings using Pydantic Settings + YAML config
+├── models.py              # PyTorch model definitions (MLP, KAN, LSTM, CNN)
+├── schemas.py             # Pydantic data models for API
+├── inference.py           # Inference engine logic
+├── database.py            # InfluxDB connection management
+├── profiles.py            # SensorProfile ABC, IAQStandard ABC, registries
+├── builtin_profiles.py    # BME680Profile, BSECStandard (registered at import)
+└── kan.py                 # Vendored efficient-kan implementation
 
-cli/                   # CLI training module
-├── cli.py            # Main CLI entry point
-└── model_trainer.py  # Model training logic
+iaq4j/                     # CLI training module
+├── __main__.py            # CLI entry point (python -m iaq4j)
+└── model_trainer.py       # Model training orchestration
 
-training/              # Model training utilities
-├── train.py          # Training script
-├── utils.py          # Training utilities
-├── feature_engineering.py  # Feature processing
-└── evaluate.py       # Model evaluation
+training/                  # Model training utilities
+├── train.py               # train_single_model() entry point
+├── pipeline.py            # TrainingPipeline FSM (ingest → engineer → train → save)
+├── data_sources.py        # DataSource ABC, InfluxDBSource, SyntheticSource
+├── utils.py               # save_trained_model(), get_device(), etc.
+└── create_dummy_models.py # Create untrained models for dev/testing
 
-trained_models/       # Saved model artifacts
-├── mlp/             # Multi-layer Perceptron models
-├── kan/             # KAN (Kolmogorov-Arnold Networks)
-├── lstm/            # LSTM models
-└── cnn/             # CNN models
+trained_models/            # Saved model artifacts
+├── mlp/                   # Multi-layer Perceptron models
+├── kan/                   # KAN (Kolmogorov-Arnold Networks)
+├── lstm/                  # LSTM models
+└── cnn/                   # CNN models
 ```
 
 ## Critical Constraints
