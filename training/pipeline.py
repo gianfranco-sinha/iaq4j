@@ -12,9 +12,10 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from app.config import settings
 from app.models import MODEL_REGISTRY, build_model
+import app.builtin_profiles  # noqa: F401  — registers sensor/standard profiles
+from app.profiles import get_iaq_standard, get_sensor_profile
 from training.data_sources import DataSource
 from training.utils import (
-    calculate_absolute_humidity,
     create_sliding_windows,
     evaluate_model,
     find_contiguous_segments,
@@ -183,6 +184,8 @@ class TrainingPipeline:
         self._lr_scheduler_factor = lr_scheduler_factor if lr_scheduler_factor is not None else tcfg["lr_scheduler_factor"]
         self._output_dir = self._resolve_output_dir(output_dir)
         self._sensor_cfg = settings.get_sensor_config()
+        self._sensor_profile = get_sensor_profile()
+        self._iaq_standard = get_iaq_standard()
 
         self._state = PipelineState.IDLE
         self._failure: Optional[FailureInfo] = None
@@ -197,7 +200,7 @@ class TrainingPipeline:
         self._df = None
         self._X = None
         self._y = None
-        self._baseline_gas_resistance = None
+        self._baselines: Dict[str, float] = {}
         self._X_scaled = None
         self._y_scaled = None
         self._feature_scaler = None
@@ -351,7 +354,7 @@ class TrainingPipeline:
             self._df = self._df.dropna()
 
         # ── Check: sensor range outliers ────────────────────────────────
-        valid_ranges = self._sensor_cfg["valid_ranges"]
+        valid_ranges = self._sensor_profile.valid_ranges
         outlier_mask = np.zeros(len(self._df), dtype=bool)
 
         for col, (lo, hi) in valid_ranges.items():
@@ -373,7 +376,7 @@ class TrainingPipeline:
             self._df = self._df[~outlier_mask]
             logger.info(
                 "Removed %d outlier row(s) based on %s sensor ranges",
-                total_outliers, self._sensor_cfg["type"],
+                total_outliers, self._sensor_profile.name,
             )
 
         n_clean = len(self._df)
@@ -401,25 +404,16 @@ class TrainingPipeline:
         t0 = time.monotonic()
         rows_in = len(self._df)
 
-        feature_cols = self._sensor_cfg["features"]
-        target_col = self._sensor_cfg["target"]
+        profile = self._sensor_profile
+        target_col = self._iaq_standard.target_column
 
-        features = self._df[feature_cols].values
+        raw = self._df[profile.raw_features].values
 
-        gas_idx = feature_cols.index("gas_resistance")
-        temp_idx = feature_cols.index("temperature")
-        hum_idx = feature_cols.index("rel_humidity")
+        self._baselines = profile.compute_baselines(raw)
+        if self._baselines:
+            logger.info("Baselines: %s", self._baselines)
 
-        self._baseline_gas_resistance = float(np.median(features[:, gas_idx]))
-        logger.info("Baseline gas resistance: %.0f Ohm", self._baseline_gas_resistance)
-
-        gas_ratio = features[:, gas_idx] / self._baseline_gas_resistance
-        abs_humidity = calculate_absolute_humidity(features[:, temp_idx], features[:, hum_idx])
-
-        features_enhanced = np.column_stack(
-            [features, gas_ratio.reshape(-1, 1), abs_humidity.reshape(-1, 1)]
-        )
-
+        features_enhanced = profile.engineer_features(raw, self._baselines)
         targets = self._df[target_col].values
 
         # Store for next stage
@@ -431,8 +425,8 @@ class TrainingPipeline:
             duration_seconds=time.monotonic() - t0,
             rows_in=rows_in,
             rows_out=len(features_enhanced),
-            columns=feature_cols + ["gas_ratio", "abs_humidity"],
-            extra={"baseline_gas_resistance": self._baseline_gas_resistance},
+            columns=profile.all_feature_names,
+            extra={"baselines": self._baselines},
         )
 
     def _do_windowing(self) -> StageResult:
@@ -589,7 +583,7 @@ class TrainingPipeline:
         self._model = build_model(
             self._model_type,
             window_size=self._window_size,
-            num_features=len(self._sensor_cfg["features"]) + 2,
+            num_features=self._sensor_profile.total_features,
         )
 
         tcfg = settings.get_training_config()
@@ -697,7 +691,9 @@ class TrainingPipeline:
             target_scaler=self._target_scaler,
             model_type=self._model_type,
             window_size=self._window_size,
-            baseline_gas_resistance=self._baseline_gas_resistance,
+            baselines=self._baselines,
+            sensor_type=self._sensor_profile.name,
+            iaq_standard=self._iaq_standard.name,
             model_dir=str(self._model_dir),
             metrics=self._metrics,
             training_history=self._training_history,

@@ -7,9 +7,9 @@ ENDPOINT = "http://localhost:8000/predict"
 BASE_DELAY = 10  # seconds
 
 
-def random_gas_resistance():
+def random_voc_resistance():
     """
-    BME680 gas resistance behaves logarithmically.
+    BME680 VOC resistance behaves logarithmically.
     Generate a realistic value between 5kΩ and 500kΩ.
     """
     log_min = math.log10(5_000)
@@ -29,7 +29,7 @@ def generate_payload():
         "temperature": temperature,
         "rel_humidity": rel_humidity,
         "pressure": round(random.uniform(985.0, 1035.0), 2),
-        "gas_resistance": random_gas_resistance()
+        "voc_resistance": random_voc_resistance()
     }
 
     return payload

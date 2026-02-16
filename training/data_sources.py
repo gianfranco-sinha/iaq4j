@@ -23,8 +23,9 @@ class DataSource(ABC):
     def fetch(self) -> pd.DataFrame:
         """Fetch raw data (INGESTION stage).
 
-        Must return a DataFrame with columns:
-            temperature, rel_humidity, pressure, gas_resistance, iaq, iaq_accuracy
+        Must return a DataFrame whose columns match the active SensorProfile's
+        raw_features plus the IAQStandard's target_column (and optionally the
+        profile's quality_column).
         """
         ...
 
@@ -73,12 +74,22 @@ class InfluxDBSource(DataSource):
             raise
 
     def fetch(self) -> pd.DataFrame:
-        """Fetch sensor data from InfluxDB, filter by iaq_accuracy."""
+        """Fetch sensor data from InfluxDB, filter by quality column."""
         if self._client is None:
             raise RuntimeError("validate() must be called before fetch()")
 
+        from app.profiles import get_iaq_standard, get_sensor_profile
+
+        profile = get_sensor_profile()
+        standard = get_iaq_standard()
+
+        columns = list(profile.raw_features) + [standard.target_column]
+        if profile.quality_column:
+            columns.append(profile.quality_column)
+        select_clause = ", ".join(columns)
+
         query = f"""
-        SELECT temperature, rel_humidity, pressure, gas_resistance, iaq, iaq_accuracy
+        SELECT {select_clause}
         FROM {self.measurement}
         WHERE time > now() - {self.hours_back}h
         """
@@ -91,15 +102,15 @@ class InfluxDBSource(DataSource):
         df = result[self.measurement]
         raw_count = len(df)
 
-        df = df[df["iaq_accuracy"] >= self.min_iaq_accuracy]
+        if profile.quality_column and profile.quality_min is not None:
+            df = df[df[profile.quality_column] >= profile.quality_min]
         df = df.dropna()
 
         logger.info(
-            "Fetched %d raw points, %d after filtering (iaq_accuracy >= %d), "
+            "Fetched %d raw points, %d after filtering, "
             "date range: %s to %s",
             raw_count,
             len(df),
-            self.min_iaq_accuracy,
             df.index.min(),
             df.index.max(),
         )
@@ -129,30 +140,36 @@ class SyntheticSource(DataSource):
         logger.info("Validating %s", self.name)
 
     def fetch(self) -> pd.DataFrame:
-        """Generate synthetic sensor data with correlated IAQ values."""
+        """Generate synthetic sensor data matching the active sensor profile."""
+        from app.profiles import get_iaq_standard, get_sensor_profile
+
+        profile = get_sensor_profile()
+        standard = get_iaq_standard()
         rng = np.random.default_rng(self.seed)
 
-        temperature = rng.uniform(18, 30, self.num_samples)
-        rel_humidity = rng.uniform(30, 70, self.num_samples)
-        pressure = rng.uniform(980, 1020, self.num_samples)
-        gas_resistance = rng.uniform(50_000, 500_000, self.num_samples)
+        data = {}
+        for feat in profile.raw_features:
+            lo, hi = profile.valid_ranges.get(feat, (0, 1))
+            # Use a comfortable sub-range to avoid edge effects
+            margin = (hi - lo) * 0.1
+            data[feat] = rng.uniform(lo + margin, hi - margin, self.num_samples)
 
-        # IAQ derived from gas_resistance with noise:
-        # lower gas_resistance → higher IAQ (worse air quality)
-        iaq = 500 * (1 - (gas_resistance - 50_000) / 450_000) + rng.normal(0, 10, self.num_samples)
-        iaq = np.clip(iaq, 0, 500)
+        # Target: uniform across standard's scale range with noise
+        scale_lo, scale_hi = standard.scale_range
+        data[standard.target_column] = np.clip(
+            rng.uniform(scale_lo, scale_hi, self.num_samples)
+            + rng.normal(0, (scale_hi - scale_lo) * 0.02, self.num_samples),
+            scale_lo,
+            scale_hi,
+        )
 
-        iaq_accuracy = np.full(self.num_samples, 3)
+        # Quality column if the sensor profile defines one
+        if profile.quality_column and profile.quality_min is not None:
+            data[profile.quality_column] = np.full(
+                self.num_samples, profile.quality_min
+            )
 
-        df = pd.DataFrame({
-            "temperature": temperature,
-            "rel_humidity": rel_humidity,
-            "pressure": pressure,
-            "gas_resistance": gas_resistance,
-            "iaq": iaq,
-            "iaq_accuracy": iaq_accuracy,
-        })
-
+        df = pd.DataFrame(data)
         logger.info("Generated %d synthetic samples (seed=%d)", self.num_samples, self.seed)
 
         return df

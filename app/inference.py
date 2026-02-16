@@ -26,25 +26,21 @@ class InferenceEngine:
         self.prediction_history = []
         self.max_history = 1000
 
-    def predict_single(self, temperature: float, rel_humidity: float,
-                       pressure: float, gas_resistance: float) -> Dict:
-        """
-        Single prediction with enhanced metadata.
+    def predict_single(self, readings: dict = None, **kwargs) -> Dict:
+        """Single prediction with enhanced metadata.
 
-        Returns:
-            Dictionary with prediction and metadata
+        Accepts a readings dict or keyword args for backward compatibility.
         """
-        result = self.predictor.predict(temperature, rel_humidity, pressure, gas_resistance)
+        if readings is None:
+            readings = kwargs
+
+        result = self.predictor.predict(readings)
 
         # Add to history if prediction was successful
         if result.get('status') == 'ready' and result.get('iaq') is not None:
-            self.prediction_history.append({
-                'iaq': result['iaq'],
-                'temperature': temperature,
-                'rel_humidity': rel_humidity,
-                'pressure': pressure,
-                'gas_resistance': gas_resistance
-            })
+            history_entry = dict(readings)
+            history_entry['iaq'] = result['iaq']
+            self.prediction_history.append(history_entry)
 
             # Trim history if too large
             if len(self.prediction_history) > self.max_history:
@@ -64,42 +60,18 @@ class InferenceEngine:
         return result
 
     def predict_batch(self, readings: List[Dict]) -> List[Dict]:
+        """Batch prediction for multiple readings."""
+        return [self.predict_single(reading) for reading in readings]
+
+    def predict_with_uncertainty(self, readings: dict = None,
+                                 n_samples: int = 10, **kwargs) -> Dict:
+        """Prediction with uncertainty estimation using Monte Carlo dropout.
+
+        Accepts a readings dict or keyword args for backward compatibility.
         """
-        Batch prediction for multiple readings.
+        if readings is None:
+            readings = kwargs
 
-        Args:
-            readings: List of dicts with keys: temperature, humidity, pressure, resistance
-
-        Returns:
-            List of prediction results
-        """
-        results = []
-
-        for reading in readings:
-            result = self.predict_single(
-                reading['temperature'],
-                reading['rel_humidity'],
-                reading['pressure'],
-                reading['gas_resistance']
-            )
-            results.append(result)
-
-        return results
-
-    def predict_with_uncertainty(self, temperature: float, rel_humidity: float,
-                                 pressure: float, gas_resistance: float,
-                                 n_samples: int = 10) -> Dict:
-        """
-        Prediction with uncertainty estimation using Monte Carlo dropout.
-        Only works if model has dropout layers.
-
-        Args:
-            temperature, humidity, pressure, resistance: Sensor readings
-            n_samples: Number of forward passes for uncertainty estimation
-
-        Returns:
-            Prediction with uncertainty bounds
-        """
         # Enable dropout during inference for uncertainty estimation
         if self.predictor.model_type == 'mlp':
             self.predictor.model.train()  # Enables dropout
@@ -107,7 +79,7 @@ class InferenceEngine:
         predictions = []
 
         for _ in range(n_samples):
-            result = self.predictor.predict(temperature, rel_humidity, pressure, gas_resistance)
+            result = self.predictor.predict(readings)
             if result.get('iaq') is not None:
                 predictions.append(result['iaq'])
 
@@ -147,6 +119,9 @@ class InferenceEngine:
 
         iaqs = [h['iaq'] for h in self.prediction_history]
 
+        from app.profiles import get_iaq_standard
+        standard = get_iaq_standard()
+
         return {
             'count': len(self.prediction_history),
             'iaq_mean': float(np.mean(iaqs)),
@@ -159,13 +134,7 @@ class InferenceEngine:
                 'p75': float(np.percentile(iaqs, 75)),
                 'p95': float(np.percentile(iaqs, 95))
             },
-            'distribution': {
-                'excellent': sum(1 for iaq in iaqs if iaq <= 50),
-                'good': sum(1 for iaq in iaqs if 50 < iaq <= 100),
-                'moderate': sum(1 for iaq in iaqs if 100 < iaq <= 200),
-                'poor': sum(1 for iaq in iaqs if 200 < iaq <= 300),
-                'very_poor': sum(1 for iaq in iaqs if iaq > 300)
-            }
+            'distribution': standard.category_distribution(iaqs),
         }
 
     def reset_history(self):
@@ -174,44 +143,45 @@ class InferenceEngine:
         logger.info("Prediction history cleared")
 
     def analyze_sensor_drift(self) -> Optional[Dict]:
-        """
-        Analyze if sensor might be drifting based on prediction history.
-        Useful for detecting sensor calibration issues.
-        """
+        """Analyze if sensor might be drifting based on prediction history."""
         if len(self.prediction_history) < 50:
             return None
 
+        from app.profiles import get_sensor_profile
+        profile = get_sensor_profile()
+
         recent = self.prediction_history[-50:]
 
-        # Check gas resistance stability
-        gas_resistances = [h['gas_resistance'] for h in recent]
-        res_mean = np.mean(gas_resistances)
-        res_std = np.std(gas_resistances)
+        # Check stability of each raw feature
+        feature_stability = {}
+        warnings = []
 
-        # Check for unusual patterns
+        for feat in profile.raw_features:
+            values = [h.get(feat) for h in recent if feat in h]
+            if not values:
+                continue
+            feat_mean = np.mean(values)
+            feat_std = np.std(values)
+            cv = float(feat_std / feat_mean) if feat_mean != 0 else 0.0
+            feature_stability[feat] = {
+                'mean': float(feat_mean),
+                'std': float(feat_std),
+                'cv': cv,
+            }
+            if cv > 0.3:
+                warnings.append(f"High {feat} variability (CV={cv:.2f})")
+            elif cv < 0.01 and feat_mean != 0:
+                warnings.append(f"{feat} appears stuck (CV={cv:.4f})")
+
+        # Check IAQ trend
         iaqs = [h['iaq'] for h in recent]
         iaq_trend = np.polyfit(range(len(iaqs)), iaqs, 1)[0]
 
-        warnings = []
-
-        # Check for drift
-        if abs(iaq_trend) > 1.0:  # IAQ changing by >1 point per reading
+        if abs(iaq_trend) > 1.0:
             warnings.append("Rapid IAQ trend detected")
 
-        # Check for resistance instability
-        if res_std / res_mean > 0.3:  # >30% variation
-            warnings.append("High gas resistance variability")
-
-        # Check for stuck readings
-        if res_std / res_mean < 0.01:  # <1% variation
-            warnings.append("Gas resistance appears stuck")
-
         return {
-            'gas_resistance_stability': {
-                'mean': float(res_mean),
-                'std': float(res_std),
-                'cv': float(res_std / res_mean)  # Coefficient of variation
-            },
+            'feature_stability': feature_stability,
             'iaq_trend': float(iaq_trend),
             'warnings': warnings,
             'health': 'good' if not warnings else 'warning'
@@ -232,18 +202,15 @@ class StreamingInference:
         self.last_prediction_time = 0
         self.dropped_readings = 0
 
-    def predict(self, temperature: float, rel_humidity: float,
-                pressure: float, gas_resistance: float,
-                force: bool = False) -> Optional[Dict]:
-        """
-        Predict with rate limiting.
+    def predict(self, readings: dict = None, force: bool = False,
+                **kwargs) -> Optional[Dict]:
+        """Predict with rate limiting.
 
-        Args:
-            force: If True, bypass rate limiting
-
-        Returns:
-            Prediction result or None if rate limited
+        Accepts a readings dict or keyword args for backward compatibility.
         """
+        if readings is None:
+            readings = kwargs
+
         import time
         current_time = time.time()
 
@@ -251,7 +218,7 @@ class StreamingInference:
             self.dropped_readings += 1
             return None
 
-        result = self.predictor.predict(temperature, rel_humidity, pressure, gas_resistance)
+        result = self.predictor.predict(readings)
         self.last_prediction_time = current_time
 
         return result

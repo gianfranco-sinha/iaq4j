@@ -14,6 +14,7 @@ from app.schemas import (
 )
 from app.config import settings
 from app.database import influx_manager
+import app.builtin_profiles  # noqa: F401  — registers sensor/standard profiles
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
-    description="ML-based BSEC IAQ index reproduction from raw BME680 sensor data",
+    description="ML-based indoor air quality prediction — sensor and standard agnostic",
     lifespan=lifespan
 )
 
@@ -182,23 +183,16 @@ async def predict_iaq(reading: SensorReading):
 
     try:
         engine = inference_engines[active_model]
+        sensor_readings = reading.get_readings()
 
-        result = engine.predict_single(
-            reading.temperature,
-            reading.rel_humidity,
-            reading.pressure,
-            reading.gas_resistance
-        )
+        result = engine.predict_single(sensor_readings)
 
         # Log prediction to InfluxDB if enabled and prediction was successful
         if result.get('status') == 'ready' and result.get('iaq') is not None:
             timestamp = reading.timestamp if reading.timestamp else datetime.utcnow().isoformat()
             influx_manager.write_prediction(
                 timestamp=timestamp,
-                temperature=reading.temperature,
-                rel_humidity=reading.rel_humidity,
-                pressure=reading.pressure,
-                gas_resistance=reading.gas_resistance,
+                readings=sensor_readings,
                 iaq_predicted=result['iaq'],
                 model_type=active_model
             )
@@ -229,10 +223,7 @@ async def predict_with_uncertainty(reading: SensorReading):
         engine = inference_engines[active_model]
 
         result = engine.predict_with_uncertainty(
-            reading.temperature,
-            reading.rel_humidity,
-            reading.pressure,
-            reading.gas_resistance,
+            reading.get_readings(),
             n_samples=10
         )
 
@@ -253,12 +244,7 @@ async def predict_compare(reading: SensorReading):
 
     for name, predictor in predictors.items():
         try:
-            result = predictor.predict(
-                reading.temperature,
-                reading.rel_humidity,
-                reading.pressure,
-                reading.gas_resistance
-            )
+            result = predictor.predict(reading.get_readings())
             results[name] = result
         except Exception as e:
             logger.error(f"Error with {name} model: {e}")

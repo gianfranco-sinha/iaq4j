@@ -244,28 +244,24 @@ class IAQPredictor:
     def __init__(
         self, model_type: str = "mlp", window_size: int = 10, model_path: str = None
     ):
-        """
-        Initialize IAQ predictor.
-
-        Args:
-            model_type: Type of model ('mlp', 'lstm', 'cnn', 'kan')
-            window_size: Size of sliding window for temporal models
-            model_path: Path to saved model directory
-        """
         self.model_type: str = model_type
         self.window_size: int = window_size
         self.model_path: str = model_path
         self.model = None  # Type: torch.nn.Module
-        self.feature_scaler = None  # StandardScaler for 6 engineered features
-        self.target_scaler = None  # MinMaxScaler for IAQ target
+        self.feature_scaler = None  # StandardScaler for engineered features
+        self.target_scaler = None  # MinMaxScaler for target
         self.config = None  # Type: dict
         self.device: str = "cpu"
-        self.baseline_gas_resistance: float = None
+        self._baselines: dict = {}
 
         # Sliding window buffer for all models (all use windowed input)
         self.buffer: list = []
 
         self._model_registry = MODEL_REGISTRY
+
+        from app.profiles import get_iaq_standard, get_sensor_profile
+        self.sensor_profile = get_sensor_profile()
+        self.iaq_standard = get_iaq_standard()
 
     def load_model(self, model_path: str) -> bool:
         """Load model from saved artifacts."""
@@ -316,16 +312,15 @@ class IAQPredictor:
                     if "num_features" in model_data:
                         model_params["num_features"] = model_data["num_features"]
 
+            num_features = self.sensor_profile.total_features
+
             # Add required parameters based on model type
             if self.model_type in ["mlp", "kan"]:
-                # Use saved input_dim if available, otherwise calculate
                 if "input_dim" not in model_params:
-                    model_params["input_dim"] = self.window_size * 6
+                    model_params["input_dim"] = self.window_size * num_features
             elif self.model_type in ["lstm", "cnn"]:
                 model_params.setdefault("window_size", self.window_size)
-                model_params.setdefault(
-                    "num_features", 6
-                )  # 4 raw + 2 engineered (gas_ratio, abs_humidity)
+                model_params.setdefault("num_features", num_features)
 
             self.model = ModelClass(**model_params)
 
@@ -345,8 +340,12 @@ class IAQPredictor:
             if target_scaler_path.exists():
                 self.target_scaler = joblib.load(target_scaler_path)
 
-            # Load baseline gas resistance from config
-            self.baseline_gas_resistance = self.config.get("baseline_gas_resistance")
+            # Load baselines from config (new format or legacy)
+            self._baselines = self.config.get("baselines", {})
+            if not self._baselines and self.config.get("baseline_gas_resistance"):
+                self._baselines = {
+                    "voc_resistance": self.config["baseline_gas_resistance"]
+                }
 
             # Read window_size from config if saved
             if "window_size" in self.config:
@@ -358,50 +357,29 @@ class IAQPredictor:
             logger.error(f"Failed to load model: {e}")
             return False
 
-    def _engineer_features(
-        self, temperature: float, rel_humidity: float,
-        pressure: float, gas_resistance: float,
-    ) -> np.ndarray:
-        """Build 6-feature vector: 4 raw + gas_ratio + abs_humidity."""
-        from training.utils import calculate_absolute_humidity
-
-        baseline = self.baseline_gas_resistance or gas_resistance
-        gas_ratio = gas_resistance / baseline
-
-        abs_humidity = calculate_absolute_humidity(
-            np.array([temperature]), np.array([rel_humidity])
-        )[0]
-
-        return np.array([
-            temperature, rel_humidity, pressure, gas_resistance,
-            gas_ratio, abs_humidity,
-        ])
-
-    def predict(
-        self,
-        temperature: float,
-        rel_humidity: float,
-        pressure: float,
-        gas_resistance: float,
-    ) -> dict:
+    def predict(self, readings: dict = None, **kwargs) -> dict:
         """Predict IAQ from sensor readings.
 
-        All model types use the same flow:
-        1. Engineer 6 features (4 raw + gas_ratio + abs_humidity)
-        2. Buffer readings until window is full
-        3. Flatten window, scale, run model, inverse-scale output
+        Accepts either a readings dict or keyword arguments for backward
+        compatibility (temperature, rel_humidity, pressure, voc_resistance).
+
+        Flow: engineer features → buffer → flatten → scale → forward → inverse-scale → clamp → categorize
         """
+        # Backward-compat: accept keyword args and wrap into readings dict
+        if readings is None:
+            readings = kwargs
+
         if self.model is None:
             return {"iaq": None, "status": "error", "message": "Model not loaded"}
 
         try:
-            # Step 1: engineer 6 features
-            features_6 = self._engineer_features(
-                temperature, rel_humidity, pressure, gas_resistance
+            # Step 1: profile-driven feature engineering
+            features = self.sensor_profile.engineer_features_single(
+                readings, self._baselines
             )
 
             # Step 2: buffer (all models use windowed input)
-            self.buffer.append(features_6)
+            self.buffer.append(features)
             if len(self.buffer) > self.window_size:
                 self.buffer.pop(0)
 
@@ -433,32 +411,16 @@ class IAQPredictor:
             else:
                 iaq_value = float(scaled_value[0, 0])
 
-            # Clamp to valid IAQ range
-            iaq_value = max(0, min(500, iaq_value))
-
-            # Determine air quality category
-            if iaq_value <= 50:
-                category = "Excellent"
-            elif iaq_value <= 100:
-                category = "Good"
-            elif iaq_value <= 200:
-                category = "Moderate"
-            elif iaq_value <= 300:
-                category = "Poor"
-            else:
-                category = "Very Poor"
+            # Standard-driven clamp and categorize
+            iaq_value = self.iaq_standard.clamp(iaq_value)
+            category = self.iaq_standard.categorize(iaq_value)
 
             return {
                 "iaq": iaq_value,
                 "category": category,
                 "status": "ready",
                 "model_type": self.model_type,
-                "raw_inputs": {
-                    "temperature": temperature,
-                    "rel_humidity": rel_humidity,
-                    "pressure": pressure,
-                    "gas_resistance": gas_resistance,
-                },
+                "raw_inputs": readings,
                 "buffer_size": len(self.buffer),
                 "required": self.window_size,
             }

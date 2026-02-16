@@ -206,14 +206,32 @@ class InfluxDBManager:
     def write_prediction(
         self,
         timestamp,
-        temperature,
-        rel_humidity,
-        pressure,
-        gas_resistance,
         iaq_predicted,
         model_type,
+        readings: dict = None,
+        # Legacy kwargs for backward compatibility
+        temperature=None,
+        rel_humidity=None,
+        pressure=None,
+        voc_resistance=None,
     ):
-        """Write prediction to InfluxDB (if enabled and connected)."""
+        """Write prediction to InfluxDB (if enabled and connected).
+
+        Accepts either a generic ``readings`` dict or the legacy keyword
+        arguments.
+        """
+        # Build fields dict from readings or legacy kwargs
+        if readings is None:
+            readings = {}
+            if temperature is not None:
+                readings["temperature"] = temperature
+            if rel_humidity is not None:
+                readings["rel_humidity"] = rel_humidity
+            if pressure is not None:
+                readings["pressure"] = pressure
+            if voc_resistance is not None:
+                readings["voc_resistance"] = voc_resistance
+
         if not self.db_config.get("enabled", False):
             logger.debug("InfluxDB logging disabled - skipping write")
             return False
@@ -226,45 +244,32 @@ class InfluxDBManager:
                 return False
 
         try:
+            fields = {k: float(v) for k, v in readings.items()}
+            fields["iaq_predicted"] = float(iaq_predicted)
+
             # Attempt write based on version
             if self.version == "2.x":
-                # InfluxDB 2.x uses write_api with different method
                 from influxdb_client import Point
                 from datetime import datetime
 
-                point = (
-                    Point("iaq_predictions")
-                    .tag("model", model_type)
-                    .field("temperature", float(temperature))
-                    .field("humidity", float(rel_humidity))
-                    .field("pressure", float(pressure))
-                    .field("resistance", float(gas_resistance))
-                    .field("iaq_predicted", float(iaq_predicted))
-                    .time(datetime.fromtimestamp(timestamp))
-                )
+                point = Point("iaq_predictions").tag("model", model_type)
+                for k, v in fields.items():
+                    point = point.field(k, v)
+                point = point.time(datetime.fromtimestamp(timestamp))
 
                 write_api = self.client.write_api()
                 write_api.write(bucket=self.db_config.get("bucket"), record=point)
-                result = True  # InfluxDB 2.x doesn't return boolean
+                result = True
 
             else:
-                # InfluxDB 1.x uses DataFrameClient
                 json_body = [
                     {
                         "measurement": "iaq_predictions",
                         "time": timestamp,
                         "tags": {"model": model_type},
-                        "fields": {
-                            "temperature": float(temperature),
-                            "humidity": float(rel_humidity),
-                            "pressure": float(pressure),
-                            "resistance": float(gas_resistance),
-                            "iaq_predicted": float(iaq_predicted),
-                        },
+                        "fields": fields,
                     }
                 ]
-
-                # Attempt write
                 result = self.client.write_points(json_body, time_precision="s")
 
             if result or result is None:

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-IAQ-Forge — ML platform for air quality prediction from BME680 sensor data. Trains and serves MLP, KAN, LSTM, and CNN models that reproduce BSEC IAQ indices. Python 3.9+, FastAPI, PyTorch, InfluxDB.
+IAQ-Forge — ML platform for indoor air quality prediction. **Scope: any indoor air quality sensor, any indoor IAQ standard, ML-driven prediction.** Trains and serves MLP, KAN, LSTM, and CNN models. Python 3.9+, FastAPI, PyTorch, InfluxDB. Default sensor: BME680. Default standard: BSEC IAQ.
 
 ## Commands
 
@@ -40,14 +40,17 @@ Both paths save artifacts to `trained_models/{model_type}/` (model.pt, config.js
 
 **FastAPI service** (`app/main.py`): loads all 4 models at startup into global `predictors` and `inference_engines` dicts. Active model switchable via `/model/select`. Predictions optionally written to InfluxDB.
 
-**Inference flow**: `SensorReading` → `InferenceEngine` → `IAQPredictor.predict()` → scaler transform → torch forward pass → clamp [0,500] → categorize → `IAQResponse`
+**Inference flow**: `SensorReading` → `InferenceEngine` → `IAQPredictor.predict()` → profile feature engineering → scaler transform → torch forward pass → standard clamp/categorize → `IAQResponse`
 
-**Config**: `model_config.yaml` is source of truth for model architecture. `database_config.yaml` for InfluxDB. Both loaded by `app/config.py:Settings` singleton (`settings`). YAML overrides hardcoded defaults.
+**Sensor & standard abstractions** (`app/profiles.py`): `SensorProfile` ABC defines raw features, valid ranges, and feature engineering. `IAQStandard` ABC defines target scale and category breakpoints. Built-in implementations in `app/builtin_profiles.py` (BME680 + BSEC). Selected via `sensor.type` and `iaq_standard.type` in `model_config.yaml`.
+
+**Config**: `model_config.yaml` is source of truth for model architecture, sensor profile, and IAQ standard. `database_config.yaml` for InfluxDB. Both loaded by `app/config.py:Settings` singleton (`settings`). YAML overrides hardcoded defaults.
 
 ## Key Technical Details
 
-- **6 features**: 4 raw (temp, humidity, pressure, gas_resistance) + 2 engineered (gas_ratio, abs_humidity). Computed in `training/utils.prepare_features()`.
-- **Sliding window**: LSTM/CNN need `window_size` readings buffered before first prediction. `IAQPredictor.buffer` manages this; returns status `buffering` until full.
+- **Features are profile-driven**: `SensorProfile.raw_features` + `SensorProfile.engineered_feature_names` determine `num_features`. BME680 default: 4 raw + 2 engineered = 6.
+- **Feature engineering is code**: each `SensorProfile` subclass owns its `engineer_features()` method. No config DSL.
+- **Sliding window**: all models buffer `window_size` readings before first prediction. `IAQPredictor.buffer` manages this.
 - **Input dimensions**: MLP/KAN flatten to `window_size × num_features`; LSTM/CNN keep temporal shape `(batch, window_size, num_features)`.
 - **Scaling**: StandardScaler for features, MinMaxScaler(0,1) for targets. Scalers saved as .pkl alongside models.
 - **KAN**: `efficient-kan` vendored in `app/kan.py` — external package breaks on Python >3.9 on Apple Silicon.

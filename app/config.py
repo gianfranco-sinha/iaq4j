@@ -117,13 +117,13 @@ class Settings(BaseSettings):
         config = self.load_model_config()
         defaults = {
             "type": "bme680",
-            "features": ["temperature", "rel_humidity", "pressure", "gas_resistance"],
+            "features": ["temperature", "rel_humidity", "pressure", "voc_resistance"],
             "target": "iaq",
             "valid_ranges": {
                 "temperature": [-40, 85],
                 "rel_humidity": [0, 100],
                 "pressure": [300, 1100],
-                "gas_resistance": [1000, 2000000],
+                "voc_resistance": [1000, 2000000],
                 "iaq_accuracy": [2, 3],
             },
         }

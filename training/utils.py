@@ -221,7 +221,9 @@ def save_training_history(model_type, epochs, train_losses, val_losses, metrics,
 
 def save_trained_model(
     model, feature_scaler, target_scaler, model_type,
-    window_size, baseline_gas_resistance, model_dir, metrics,
+    window_size, model_dir, metrics,
+    baselines=None, sensor_type=None, iaq_standard=None,
+    baseline_gas_resistance=None,  # legacy compat
     training_history=None,
 ):
     """Save a fully trained model with scalers, config, and checkpoint."""
@@ -233,24 +235,40 @@ def save_trained_model(
     with open(f"{model_dir}/target_scaler.pkl", "wb") as f:
         pickle.dump(target_scaler, f)
 
+    # Resolve baselines — support both new dict and legacy scalar
+    if baselines is None:
+        baselines = {}
+    if baseline_gas_resistance is not None and "voc_resistance" not in baselines:
+        baselines["voc_resistance"] = float(baseline_gas_resistance)
+
     config = {
-        "baseline_gas_resistance": float(baseline_gas_resistance),
+        "sensor_type": sensor_type or "bme680",
+        "iaq_standard": iaq_standard or "bsec",
+        "baselines": {k: float(v) for k, v in baselines.items()},
+        "baseline_gas_resistance": baselines.get("voc_resistance", 0.0),
         "trained_date": pd.Timestamp.now().isoformat(),
         "window_size": window_size,
         "mae": float(metrics["mae"]),
         "rmse": float(metrics["rmse"]),
         "r2": float(metrics["r2"]),
-        "notes": f"Trained on real BSEC data with {model_type.upper()}",
+        "notes": f"Trained with {model_type.upper()} ({sensor_type or 'bme680'}/{iaq_standard or 'bsec'})",
     }
 
     with open(f"{model_dir}/config.json", "w") as f:
         json.dump(config, f, indent=2)
 
+    # Determine num_features from the active sensor profile
+    try:
+        from app.profiles import get_sensor_profile
+        num_features = get_sensor_profile().total_features
+    except Exception:
+        num_features = 6
+
     checkpoint = {
         "state_dict": model.cpu().state_dict(),
         "model_type": model_type,
         "window_size": window_size,
-        "input_dim": window_size * 6,
+        "input_dim": window_size * num_features,
     }
 
     torch.save(checkpoint, f"{model_dir}/model.pt")
