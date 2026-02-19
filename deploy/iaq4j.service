@@ -8,7 +8,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/iaq4j
 Environment=PYTHONPATH=/home/pi/iaq4j
-ExecStart=/home/pi/iaq4j/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001
+ExecStart=/home/pi/iaq4j/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --root-path /iaq4j
 Restart=always
 RestartSec=5
 StandardOutput=journal

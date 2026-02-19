@@ -160,77 +160,176 @@ this works, but with multiple devices it creates problems:
 - The semantic field mapper has no way to know two fields represent the same
   physical quantity in different units
 
-**Goal:** A central `PhysicalQuantity` registry that defines canonical units,
-valid ranges, and conversion functions. Each `SensorProfile` declares which
-quantity each raw feature maps to, plus an optional unit conversion — rather
-than hardcoding units and ranges per profile.
+**Goal:** A central YAML-based registry of physical quantities that defines
+canonical units, valid ranges, and accepted alternate units. Each sensor
+profile maps its raw features to quantities in this table. The same table
+is used by the semantic field mapper to match firmware API fields by physical
+meaning, not just name.
 
-**Proposed design:**
+**Design: YAML as the source of truth**
 
-```python
-# app/quantities.py — central registry
+The registry lives in `quantities.yaml` alongside the other config files.
+Python code (`app/quantities.py`) loads it at startup and exposes typed
+lookup + unit conversion. No physical quantities are hardcoded in Python.
 
-@dataclass
-class PhysicalQuantity:
-    name: str                          # e.g. "temperature"
-    canonical_unit: str                # e.g. "°C"
-    symbol: str                        # e.g. "T"
-    valid_range: Tuple[float, float]   # in canonical unit
-    description: str
+```yaml
+# quantities.yaml — central physical quantity registry
 
-QUANTITY_REGISTRY = {
-    "temperature":          PhysicalQuantity("temperature", "°C", "T", (-40, 85), "Ambient temperature"),
-    "relative_humidity":    PhysicalQuantity("relative_humidity", "%RH", "RH", (0, 100), "Relative humidity"),
-    "barometric_pressure":  PhysicalQuantity("barometric_pressure", "hPa", "P", (300, 1100), "Barometric pressure"),
-    "voc_resistance":       PhysicalQuantity("voc_resistance", "Ω", "R_VOC", (1000, 2_000_000), "MOX VOC sensor resistance"),
-}
+quantities:
+  temperature:
+    canonical_unit: "°C"
+    symbol: "T"
+    description: "Ambient temperature"
+    valid_range: [-40, 85]
+    alternate_units:
+      "°F":
+        convert: "({value} - 32) * 5/9"
+      "K":
+        convert: "{value} - 273.15"
+
+  relative_humidity:
+    canonical_unit: "%RH"
+    symbol: "RH"
+    description: "Relative humidity"
+    valid_range: [0, 100]
+
+  barometric_pressure:
+    canonical_unit: "hPa"
+    symbol: "P"
+    description: "Barometric pressure"
+    valid_range: [300, 1100]
+    alternate_units:
+      "Pa":
+        convert: "{value} / 100"
+      "kPa":
+        convert: "{value} * 10"
+      "mbar":
+        convert: "{value}"             # 1:1 with hPa
+      "inHg":
+        convert: "{value} * 33.8639"
+
+  voc_resistance:
+    canonical_unit: "Ω"
+    symbol: "R_VOC"
+    description: "MOX sensor resistance to volatile organic compounds"
+    valid_range: [1000, 2000000]
+    alternate_units:
+      "kΩ":
+        convert: "{value} * 1000"
+      "MΩ":
+        convert: "{value} * 1000000"
+
+  co2:
+    canonical_unit: "ppm"
+    symbol: "CO2"
+    description: "Carbon dioxide concentration"
+    valid_range: [400, 5000]
+
+  pm2_5:
+    canonical_unit: "µg/m³"
+    symbol: "PM2.5"
+    description: "Particulate matter ≤ 2.5µm"
+    valid_range: [0, 500]
+
+  tvoc:
+    canonical_unit: "ppb"
+    symbol: "TVOC"
+    description: "Total volatile organic compounds"
+    valid_range: [0, 60000]
+
+  # --- IAQ indices (computed by sensor firmware / external libraries) ---
+  # These are both sensor outputs AND prediction targets.
+
+  bsec_iaq:
+    canonical_unit: "index"
+    symbol: "IAQ"
+    description: "Bosch BSEC Indoor Air Quality index"
+    valid_range: [0, 500]
+    kind: "iaq_standard"              # marks this as a prediction target, not just a sensor input
+
+  epa_aqi:
+    canonical_unit: "index"
+    symbol: "AQI"
+    description: "US EPA Air Quality Index"
+    valid_range: [0, 500]
+    kind: "iaq_standard"
 ```
+
+**IAQ quantities serve dual roles:**
+
+IAQ indices like `bsec_iaq` are both sensor outputs (the firmware computes
+them) and prediction targets (the model learns to reproduce them). This means:
+
+- They appear in `quantities.yaml` alongside sensor readings — same unit,
+  range, and description metadata
+- The `iaq_actual` field on `SensorReading` maps to a quantity in the table
+  (e.g. `bsec_iaq`), enabling the mapper to match firmware fields like
+  `static_iaq` or `iaq_score` to the right quantity
+- `IAQStandard` subclasses derive their `scale_range` from the YAML table
+  but still own behavioral logic in Python: category breakpoints, clamping,
+  and `categorize()` — these are domain rules, not data
+- Comparing predicted vs actual IAQ uses the same quantity definition, ensuring
+  consistent scale and units across evaluation
 
 **SensorProfile changes:**
 
 ```python
-# Instead of defining valid_ranges and field_descriptions per profile:
+# Each profile maps its raw features to quantities from the YAML table:
 class BME680Profile(SensorProfile):
     @property
-    def feature_quantities(self) -> Dict[str, FeatureMapping]:
+    def feature_quantities(self) -> Dict[str, str]:
         return {
-            "temperature":    FeatureMapping(quantity="temperature", unit="°C"),       # already canonical
-            "rel_humidity":   FeatureMapping(quantity="relative_humidity", unit="%RH"),
-            "pressure":       FeatureMapping(quantity="barometric_pressure", unit="hPa"),
-            "voc_resistance": FeatureMapping(quantity="voc_resistance", unit="Ω"),
+            "temperature":    "temperature",           # feature name → quantity name
+            "rel_humidity":   "relative_humidity",
+            "pressure":       "barometric_pressure",
+            "voc_resistance": "voc_resistance",
         }
 
-# A hypothetical sensor reporting Fahrenheit:
+# A sensor reporting Fahrenheit — the quantity registry handles conversion:
 class SomeOtherSensor(SensorProfile):
     @property
-    def feature_quantities(self) -> Dict[str, FeatureMapping]:
+    def feature_quantities(self) -> Dict[str, str]:
         return {
-            "temp_f": FeatureMapping(quantity="temperature", unit="°F", convert=fahrenheit_to_celsius),
+            "temp_f": "temperature",    # maps to same quantity
+        }
+
+    @property
+    def feature_units(self) -> Dict[str, str]:
+        return {
+            "temp_f": "°F",             # not canonical — auto-converted at ingestion
         }
 ```
+
+**How the mapper uses it:**
+
+The semantic field mapper matches firmware fields against `quantities.yaml`
+by description, unit, and valid range — not just field name. When a firmware
+field has unit "°F" and range [32, 185], the mapper can confidently match it
+to the `temperature` quantity even if the firmware calls it `comp_t`.
 
 **Impact on existing code:**
 
 | Component | Change |
 |-----------|--------|
-| New `app/quantities.py` | Central `PhysicalQuantity` registry + `FeatureMapping` dataclass |
-| `SensorProfile` ABC | Add `feature_quantities` property; derive `valid_ranges`, `field_descriptions` from registry |
-| `BME680Profile` | Replace `valid_ranges`/`field_descriptions` with `feature_quantities` mapping |
-| Feature engineering | Conversion applied before formulas, guaranteeing canonical units |
-| Semantic field mapper | Can match by physical quantity, not just field name — much more robust |
-| `SensorReading` validation | Range checks derived from registry in canonical units |
+| New `quantities.yaml` | YAML table of all known physical quantities with canonical units, ranges, and conversions |
+| New `app/quantities.py` | Loads YAML, exposes `get_quantity()`, `convert_to_canonical()` |
+| `SensorProfile` ABC | Add `feature_quantities` property mapping features → quantity names; `valid_ranges` and `field_descriptions` become computed from the YAML registry |
+| `BME680Profile` | Replace hardcoded `valid_ranges`/`field_descriptions` with `feature_quantities` mapping |
+| Feature engineering | Conversion to canonical units applied before formulas |
+| Semantic field mapper | Matches by physical quantity (description + unit + range), not just field name |
+| `SensorReading` validation | Range checks derived from YAML registry in canonical units |
 | Backward compat | `valid_ranges` and `field_descriptions` still work as computed properties |
 
 **Requirements:**
 
-- [ ] `app/quantities.py` with `PhysicalQuantity` dataclass and `QUANTITY_REGISTRY`
-- [ ] `FeatureMapping` dataclass: maps a raw feature to a quantity + source unit + optional converter
-- [ ] `SensorProfile.feature_quantities` abstract property replaces per-profile unit definitions
-- [ ] `valid_ranges` and `field_descriptions` become computed from `feature_quantities` + registry (backward compat)
-- [ ] Unit conversion functions for common pairs (°F→°C, Pa→hPa, kΩ→Ω, etc.)
+- [ ] `quantities.yaml` with all known physical quantities, canonical units, valid ranges, and alternate unit conversions
+- [ ] `app/quantities.py` loads YAML, exposes `get_quantity()`, `convert_to_canonical(value, from_unit, quantity_name)`
+- [ ] Conversion expressions in YAML evaluated safely (no `eval` — use a simple expression parser or lookup table)
+- [ ] `SensorProfile.feature_quantities` property maps feature names → quantity names from the YAML table
+- [ ] `valid_ranges` and `field_descriptions` become computed from `feature_quantities` + YAML registry (backward compat)
 - [ ] Conversion applied transparently at ingestion time (before feature engineering)
-- [ ] Semantic mapper uses quantity identity for cross-device field matching
-- [ ] Registry extensible: new quantities added without modifying existing profiles
+- [ ] Semantic mapper uses quantity identity + unit + range for cross-device field matching
+- [ ] Registry extensible: add new quantities by editing YAML, no Python changes needed
 
 ---
 
