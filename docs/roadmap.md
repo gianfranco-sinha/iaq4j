@@ -50,12 +50,43 @@ feature names. The mapping is persisted in config — no LLM in the hot path.
 
 **Supported input sources:**
 
+**Two primary input sources:**
+
+**Source A: CSV file with sensor readings** — the most common path. User
+uploads a CSV file containing column headers from their sensor. The mapper
+reads the headers, samples values (to infer units and ranges), and maps each
+column to a quantity in `quantities.yaml`.
+
+```
+Upload: my_sensor_data.csv
+Headers: timestamp, comp_temp, comp_hum, comp_press, gas_res, static_iaq
+Sample:  2026-01-15T10:00:00, 23.5, 55.2, 1013.0, 85000, 42
+
+Mapper output:
+  comp_temp    → temperature (°C, confidence 0.95, fuzzy match)
+  comp_hum     → relative_humidity (%RH, confidence 0.92, fuzzy match)
+  comp_press   → barometric_pressure (hPa, confidence 0.90, fuzzy match)
+  gas_res      → voc_resistance (Ω, confidence 0.70, LLM match)
+  static_iaq   → bsec_iaq (index, confidence 0.85, LLM match)
+```
+
+**Source B: Device profile on GitHub** — the firmware repo documents the
+sensor's API fields in struct definitions, JSON schemas, README docs, or
+example payloads. The mapper crawls the repo to extract field metadata.
+
 | Source | Example | What the mapper extracts |
 |--------|---------|--------------------------|
-| Example JSON payload | `--api-spec payload.json` | Field names, value types, example values |
-| OpenAPI / header file | `--api-spec api.yaml` or `sensor.h` | Field names, types, descriptions |
-| GitHub repo | `--api-spec https://github.com/org/firmware` | Crawls repo for struct defs, JSON schemas, API routes, README field docs |
-| Raw URL | `--api-spec https://docs.example.com/api` | Fetches and parses page content |
+| CSV with headers | `--source data.csv` | Column names, sampled values for unit/range inference |
+| GitHub repo | `--source https://github.com/org/firmware` | Struct defs, JSON schemas, API routes, README field docs |
+| Example JSON payload | `--source payload.json` | Field names, value types, example values |
+| OpenAPI / header file | `--source api.yaml` or `sensor.h` | Field names, types, descriptions |
+| Raw URL | `--source https://docs.example.com/api` | Fetches and parses page content |
+
+For CSV files, the mapper:
+1. Reads column headers as candidate field names
+2. Samples N rows to infer value ranges, types, and likely units
+3. Cross-references against `quantities.yaml` (valid ranges, units)
+4. Feeds results to the tiered matching pipeline
 
 For GitHub repos, the mapper uses `gh` CLI or the GitHub API to:
 1. List repo contents and identify relevant files (`.h`, `.c`, `.json`,
@@ -64,14 +95,14 @@ For GitHub repos, the mapper uses `gh` CLI or the GitHub API to:
 3. Parse any example payloads or test fixtures
 4. Feed all discovered field metadata to the matching tiers
 
-**How it works:**
+**How it works (both sources):**
 
-1. User provides firmware API reference (file, URL, or GitHub repo)
-2. Mapper extracts field names and metadata from the source (repo crawl for
-   GitHub, direct parse for files)
-3. Tier 1+2 (exact/fuzzy) resolve obvious matches against `field_descriptions`
+1. User provides a CSV file or device profile reference (GitHub repo, URL, file)
+2. Mapper extracts field names and metadata from the source
+3. Tier 1+2 (exact/fuzzy) resolve obvious matches against `quantities.yaml`
+   entries — using field names, sampled value ranges, and unit inference
 4. Remaining ambiguous fields go to Tier 3 (LLM) with full context from both
-   the firmware source and the sensor profile
+   the source and the quantity registry
 5. LLM outputs candidate mapping with confidence scores and reasoning
 6. User confirms or adjusts interactively
 7. Mapping saved to `model_config.yaml` under `sensor.field_mapping`
