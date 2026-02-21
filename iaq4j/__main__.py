@@ -67,6 +67,11 @@ def create_parser():
         "list", help="List available models in registry"
     )
 
+    # Version command
+    version_parser = subparsers.add_parser(
+        "version", help="Show active model versions (semver)"
+    )
+
     # Map fields command
     map_parser = subparsers.add_parser(
         "map-fields", help="Map CSV column headers to iaq4j features"
@@ -144,6 +149,42 @@ def main():
             except Exception as e:
                 print(f"❌ {model_type.upper()} training failed: {e}")
                 continue
+
+    elif args.command == "version":
+        import json
+
+        from app.config import settings
+
+        manifest_path = Path(settings.TRAINED_MODELS_BASE) / "MANIFEST.json"
+        if not manifest_path.exists():
+            print("No MANIFEST.json found. Train a model first.")
+            return
+
+        with open(manifest_path) as f:
+            central = json.load(f)
+
+        active_runs = [r for r in central.get("runs", []) if r.get("is_active")]
+
+        if not active_runs:
+            print("No active model versions found.")
+            return
+
+        print(f"\n{'Model':<8} {'Version':<16} {'Schema FP':<14} {'MAE':>8} {'RMSE':>8} {'R2':>8}  {'Trained'}")
+        print("-" * 88)
+
+        for run in sorted(active_runs, key=lambda r: r.get("model_type", "")):
+            model_type = run.get("model_type", "?")
+            version = run.get("version", "?")
+            schema_fp = run.get("schema_fingerprint", "—")
+            metrics = run.get("metrics", {})
+            mae = f"{metrics['mae']:.2f}" if "mae" in metrics else "—"
+            rmse = f"{metrics['rmse']:.2f}" if "rmse" in metrics else "—"
+            r2 = f"{metrics['r2']:.4f}" if "r2" in metrics else "—"
+            trained = run.get("timestamp", "—")[:19]
+
+            print(f"{model_type:<8} {version:<16} {schema_fp:<14} {mae:>8} {rmse:>8} {r2:>8}  {trained}")
+
+        print()
 
     elif args.command == "list":
         from app.models import MODEL_REGISTRY

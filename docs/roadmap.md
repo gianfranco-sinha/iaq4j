@@ -25,11 +25,11 @@ lineage system so that artifact consumers can reason about compatibility.
 
 **Requirements:**
 
-- [ ] Version string in `config.json` and `MANIFEST.json` follows `{model_type}-{MAJOR}.{MINOR}.{PATCH}` (e.g. `mlp-2.1.0`)
+- [x] Version string in `config.json` and `MANIFEST.json` follows `{model_type}-{MAJOR}.{MINOR}.{PATCH}` (e.g. `mlp-2.1.0`)
 - [ ] Dataset artifacts get independent semver tied to data fingerprint and preprocessing pipeline version
-- [ ] Auto-detect bump level: compare current vs previous config.json schema, scaler shape, and data fingerprint
-- [ ] CLI support: `python -m iaq4j version` to show current active model versions
-- [ ] Reject loading a model whose MAJOR version doesn't match the serving code's expected schema
+- [x] Auto-detect bump level: compare current vs previous config.json schema, scaler shape, and data fingerprint
+- [x] CLI support: `python -m iaq4j version` to show current active model versions
+- [x] Warn (not reject) loading a model whose schema fingerprint doesn't match the serving code's expected schema
 - [ ] Migration guide when MAJOR bump occurs (what changed, how to retrain)
 
 ---

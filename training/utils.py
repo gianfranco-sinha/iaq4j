@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import pickle
+import random
 import subprocess
 
 import numpy as np
@@ -11,6 +12,21 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+
+def seed_everything(seed: int) -> None:
+    """Set all random seeds for reproducible training.
+
+    Seeds Python, NumPy, and PyTorch RNGs. Enables deterministic algorithms
+    with warn_only=True since MPS lacks deterministic implementations for some ops.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 
 def get_device():
@@ -85,13 +101,18 @@ def train_model(
     epochs=200, device=None, batch_size=32, learning_rate=0.001,
     lr_scheduler_patience=10, lr_scheduler_factor=0.5,
     log_dir=None, histogram_freq=50,
+    seed=None,
 ):
     """Train a model with DataLoader, LR scheduler, and validation tracking.
 
     Args:
         log_dir: If set, write TensorBoard events (scalars, LR, weight histograms).
         histogram_freq: Log weight histograms every N epochs (0 to disable).
+        seed: If set, seed all RNGs and use a deterministic DataLoader shuffle.
     """
+    if seed is not None:
+        seed_everything(seed)
+
     if device is None:
         device = get_device()
 
@@ -111,7 +132,11 @@ def train_model(
         torch.FloatTensor(X_val), torch.FloatTensor(y_val).reshape(-1, 1)
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    g = torch.Generator()
+    if seed is not None:
+        g.manual_seed(seed)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, generator=g)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -272,10 +297,110 @@ def save_data_manifest(manifest: dict, model_dir) -> None:
         json.dump(manifest, f, indent=2, default=str)
 
 
-def update_central_manifest(model_type: str, run_entry: dict) -> str:
-    """Read/create MANIFEST.json, increment version, append run, return version string.
+def compute_schema_fingerprint(
+    sensor_type: str,
+    iaq_standard: str,
+    window_size: int,
+    num_features: int,
+    model_type: str,
+) -> str:
+    """Hash the fields that define a model's input/output contract.
+
+    If this fingerprint changes between versions, it signals a MAJOR (breaking)
+    version bump — the model's input shape or contract has changed.
+    """
+    schema = {
+        "sensor_type": sensor_type,
+        "iaq_standard": iaq_standard,
+        "window_size": window_size,
+        "num_features": num_features,
+        "model_type": model_type,
+    }
+    return hashlib.sha256(
+        json.dumps(schema, sort_keys=True).encode()
+    ).hexdigest()[:12]
+
+
+def _parse_semver(version_str: str, model_type: str):
+    """Parse a semver version string like 'mlp-1.2.0' into (major, minor, patch).
+
+    Returns None if the string is a legacy format (e.g. 'mlp-v6') or unparseable.
+    """
+    import re
+    prefix = f"{model_type}-"
+    if not version_str.startswith(prefix):
+        return None
+    remainder = version_str[len(prefix):]
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", remainder)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def compute_semver(
+    model_type: str,
+    schema_fingerprint: str,
+    data_fingerprint: str,
+    manifest_runs: list,
+    metrics: dict = None,
+) -> str:
+    """Determine the next semantic version for a model type.
+
+    Compares against the previous *active* version of the same model_type:
+    - schema_fingerprint changed → MAJOR bump (reset minor/patch)
+    - data_fingerprint changed OR metrics changed → MINOR bump (reset patch)
+    - only metadata changed → PATCH bump
+
+    In practice every training run changes metrics, so the common path is MINOR.
+    PATCH is reserved for metadata-only updates (no retraining).
+
+    Legacy versions (e.g. 'mlp-v6') are ignored — first semver starts at 1.0.0.
+    """
+    # Find previous active semver run for this model type
+    prev_run = None
+    for run in manifest_runs:
+        if (
+            run.get("model_type") == model_type
+            and run.get("is_active")
+            and _parse_semver(run.get("version", ""), model_type) is not None
+        ):
+            prev_run = run
+
+    if prev_run is None:
+        return "1.0.0"
+
+    prev_ver = _parse_semver(prev_run["version"], model_type)
+    major, minor, patch = prev_ver
+
+    prev_schema_fp = prev_run.get("schema_fingerprint", "")
+    prev_data_fp = prev_run.get("data_fingerprint", "")
+
+    if prev_schema_fp and prev_schema_fp != schema_fingerprint:
+        return f"{major + 1}.0.0"
+
+    if prev_data_fp != data_fingerprint:
+        return f"{major}.{minor + 1}.0"
+
+    # Check if metrics changed (different weights → different metrics = retrained)
+    if metrics and prev_run.get("metrics"):
+        prev_metrics = prev_run["metrics"]
+        for key in ("mae", "rmse", "r2"):
+            if key in metrics and key in prev_metrics:
+                if abs(float(metrics[key]) - float(prev_metrics[key])) > 1e-9:
+                    return f"{major}.{minor + 1}.0"
+
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def update_central_manifest(
+    model_type: str,
+    run_entry: dict,
+    schema_fingerprint: str = None,
+) -> str:
+    """Read/create MANIFEST.json, compute semver, append run, return version string.
 
     Previous runs of the same model_type are marked is_active: false.
+    Legacy versions (mlp-v6) are preserved as-is — never modified or deleted.
     """
     from app.config import settings
 
@@ -287,22 +412,26 @@ def update_central_manifest(model_type: str, run_entry: dict) -> str:
     else:
         central = {"runs": []}
 
-    # Find max version for this model type
-    max_version = 0
+    # Compute semver before deactivating previous runs
+    semver = compute_semver(
+        model_type,
+        schema_fingerprint or "",
+        run_entry.get("data_fingerprint", ""),
+        central["runs"],
+        metrics=run_entry.get("metrics"),
+    )
+    new_version = f"{model_type}-{semver}"
+
+    # Deactivate previous runs of same model type
     for run in central["runs"]:
         if run.get("model_type") == model_type:
             run["is_active"] = False
-            v = run.get("version", "")
-            if v.startswith(f"{model_type}-v"):
-                try:
-                    max_version = max(max_version, int(v.split("-v")[1]))
-                except ValueError:
-                    pass
 
-    new_version = f"{model_type}-v{max_version + 1}"
     run_entry["version"] = new_version
     run_entry["model_type"] = model_type
     run_entry["is_active"] = True
+    if schema_fingerprint:
+        run_entry["schema_fingerprint"] = schema_fingerprint
     central["runs"].append(run_entry)
 
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -384,3 +513,16 @@ def save_trained_model(
         save_data_manifest(data_manifest, model_dir)
 
     print(f"\n  Saved {model_type.upper()}: MAE={metrics['mae']:.2f}, R2={metrics['r2']:.4f}")
+
+
+def patch_config_with_version(model_dir, version: str, schema_fingerprint: str) -> None:
+    """Patch config.json in model_dir with version and schema_fingerprint after save."""
+    config_path = Path(model_dir) / "config.json"
+    if not config_path.exists():
+        return
+    with open(config_path) as f:
+        config = json.load(f)
+    config["version"] = version
+    config["schema_fingerprint"] = schema_fingerprint
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)

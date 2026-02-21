@@ -454,6 +454,27 @@ class IAQPredictor:
             if "window_size" in self.config:
                 self.window_size = self.config["window_size"]
 
+            # Schema fingerprint compatibility check
+            saved_fp = self.config.get("schema_fingerprint")
+            if saved_fp:
+                from training.utils import compute_schema_fingerprint
+                current_fp = compute_schema_fingerprint(
+                    sensor_type=self.sensor_profile.name,
+                    iaq_standard=self.iaq_standard.name,
+                    window_size=self.window_size,
+                    num_features=num_features,
+                    model_type=self.model_type,
+                )
+                if current_fp != saved_fp:
+                    logger.warning(
+                        "Schema fingerprint mismatch for %s: "
+                        "saved=%s, current=%s. "
+                        "The model was trained with a different input contract "
+                        "(sensor_type, iaq_standard, window_size, or num_features "
+                        "may have changed). Predictions may be unreliable.",
+                        self.model_type, saved_fp, current_fp,
+                    )
+
             return True
 
         except Exception as e:

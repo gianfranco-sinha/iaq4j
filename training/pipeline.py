@@ -19,11 +19,14 @@ from training.utils import (
     _compute_data_fingerprint,
     _compute_feature_statistics,
     _get_git_commit,
+    compute_schema_fingerprint,
     create_sliding_windows,
     evaluate_model,
     find_contiguous_segments,
     get_device,
+    patch_config_with_version,
     save_trained_model,
+    seed_everything,
     train_model,
     update_central_manifest,
 )
@@ -608,6 +611,9 @@ class TrainingPipeline:
 
         self._device = get_device()
 
+        # Seed all RNGs before model creation for reproducible weight init
+        seed_everything(self._random_state)
+
         self._model = build_model(
             self._model_type,
             window_size=self._window_size,
@@ -637,6 +643,7 @@ class TrainingPipeline:
             lr_scheduler_factor=self._lr_scheduler_factor,
             log_dir=self._tb_log_dir,
             histogram_freq=histogram_freq,
+            seed=self._random_state,
         )
 
         self._training_history = history
@@ -735,6 +742,15 @@ class TrainingPipeline:
             data_manifest=manifest,
         )
 
+        # Compute schema fingerprint for semver
+        schema_fp = compute_schema_fingerprint(
+            sensor_type=self._sensor_profile.name,
+            iaq_standard=self._iaq_standard.name,
+            window_size=self._window_size,
+            num_features=self._sensor_profile.total_features,
+            model_type=self._model_type,
+        )
+
         # Update central manifest and get version
         import pandas as pd
 
@@ -745,8 +761,13 @@ class TrainingPipeline:
             "metrics": {k: float(v) for k, v in self._metrics.items()},
             "git_commit": manifest["git_commit"],
         }
-        self._version = update_central_manifest(self._model_type, run_entry)
+        self._version = update_central_manifest(
+            self._model_type, run_entry, schema_fingerprint=schema_fp,
+        )
         manifest["version"] = self._version
+
+        # Patch config.json with version + schema fingerprint (Option B)
+        patch_config_with_version(self._model_dir, self._version, schema_fp)
 
         # Re-save manifest with version included
         from training.utils import save_data_manifest
