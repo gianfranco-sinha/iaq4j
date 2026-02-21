@@ -1,7 +1,7 @@
 # ============================================================================
 # File: app/main.py
 # ============================================================================
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
@@ -109,6 +109,17 @@ app.add_middleware(
 )
 
 
+async def require_api_key(x_api_key: str = Header(None)):
+    """Reject requests without a valid API key (when API_KEY is set)."""
+    if not settings.API_KEY:
+        return
+    if x_api_key != settings.API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+auth = [Depends(require_api_key)]
+
+
 @app.get("/", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
@@ -153,7 +164,7 @@ async def list_models():
     }
 
 
-@app.post("/model/select")
+@app.post("/model/select", dependencies=auth)
 async def select_model(selection: ModelSelection):
     """Switch active model."""
     global active_model
@@ -173,7 +184,7 @@ async def select_model(selection: ModelSelection):
     }
 
 
-@app.post("/predict", response_model=IAQResponse)
+@app.post("/predict", response_model=IAQResponse, dependencies=auth)
 async def predict_iaq(reading: SensorReading):
     """Predict IAQ from sensor reading with enhanced statistics."""
     if active_model not in predictors:
@@ -214,7 +225,7 @@ async def predict_iaq(reading: SensorReading):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/predict/uncertainty")
+@app.post("/predict/uncertainty", dependencies=auth)
 async def predict_with_uncertainty(reading: SensorReading):
     """Predict IAQ with uncertainty estimation (all model types).
 
@@ -243,7 +254,7 @@ async def predict_with_uncertainty(reading: SensorReading):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/predict/compare")
+@app.post("/predict/compare", dependencies=auth)
 async def predict_compare(reading: SensorReading):
     """Get predictions from all available models."""
     if not predictors:
@@ -265,7 +276,7 @@ async def predict_compare(reading: SensorReading):
     }
 
 
-@app.post("/reset/{model_type}")
+@app.post("/reset/{model_type}", dependencies=auth)
 async def reset_buffer(model_type: str):
     """Reset the sliding window buffer for a specific model."""
     if model_type not in predictors:
@@ -280,7 +291,7 @@ async def reset_buffer(model_type: str):
     }
 
 
-@app.post("/reset/all")
+@app.post("/reset/all", dependencies=auth)
 async def reset_all_buffers():
     """Reset buffers for all models."""
     for predictor in predictors.values():
