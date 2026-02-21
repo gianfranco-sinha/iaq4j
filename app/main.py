@@ -276,21 +276,6 @@ async def predict_compare(reading: SensorReading):
     }
 
 
-@app.post("/reset/{model_type}", dependencies=auth)
-async def reset_buffer(model_type: str):
-    """Reset the sliding window buffer for a specific model."""
-    if model_type not in predictors:
-        raise HTTPException(status_code=404, detail=f"Model '{model_type}' not found")
-
-    predictors[model_type].buffer = []
-
-    return {
-        'model': model_type,
-        'status': 'buffer reset',
-        'window_size': predictors[model_type].window_size
-    }
-
-
 @app.post("/reset/all", dependencies=auth)
 async def reset_all_buffers():
     """Reset buffers for all models."""
@@ -303,6 +288,21 @@ async def reset_all_buffers():
     return {
         'status': 'all buffers reset',
         'models': list(predictors.keys())
+    }
+
+
+@app.post("/reset/{model_type}", dependencies=auth)
+async def reset_buffer(model_type: str):
+    """Reset the sliding window buffer for a specific model."""
+    if model_type not in predictors:
+        raise HTTPException(status_code=404, detail=f"Model '{model_type}' not found")
+
+    predictors[model_type].buffer = []
+
+    return {
+        'model': model_type,
+        'status': 'buffer reset',
+        'window_size': predictors[model_type].window_size
     }
 
 

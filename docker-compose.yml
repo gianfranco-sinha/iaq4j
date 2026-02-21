@@ -9,6 +9,7 @@ services:
       - /tmp:size=64m
     environment:
       - ROOT_PATH=/iaq
+      - API_KEY=${API_KEY:-}
     ports:
       - "127.0.0.1:8001:8000"
     volumes:
