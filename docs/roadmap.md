@@ -34,6 +34,59 @@ lineage system so that artifact consumers can reason about compatibility.
 
 ---
 
+## Training Run Entity
+
+### Unified lifecycle container for training runs — P2
+
+**Current state:** A single training run produces several disconnected artifacts:
+`PipelineResult` (in-memory, discarded after CLI prints), `data_manifest.json`
+(provenance), `config.json` (model config + version), `MANIFEST.json` entry
+(central registry), `training_history.json` (per-epoch losses), and binary
+artifacts (`model.pt`, scaler `.pkl` files). No single object ties these
+together as "one run." Each model type shares one directory
+(`trained_models/mlp/`) so each run overwrites the last.
+
+**Goal:** A `TrainingRun` entity that captures the full lifecycle — from data
+extraction through evaluation — in a single addressable container. Enables
+run comparison, reproduction, and rollback.
+
+**What it holds:**
+
+| Field | Source today |
+|-------|-------------|
+| Run ID | Not assigned — would be `{model_type}-{semver}` or a UUID |
+| Input config snapshot | `data_manifest.json → config` |
+| Data source metadata | `data_manifest.json → data_source` |
+| Data fingerprint | `MANIFEST.json` entry |
+| Preprocessing report | `data_manifest.json → preprocessing_issues` |
+| Stage timings | `data_manifest.json → stages` |
+| Training history | `training_history.json` |
+| Evaluation metrics | `config.json` + `MANIFEST.json` |
+| Model artifacts | `model.pt`, `feature_scaler.pkl`, `target_scaler.pkl` |
+| Version + schema fingerprint | `config.json` + `MANIFEST.json` |
+
+**Key capabilities:**
+
+- **Compare runs** — diff two runs by config, data, metrics without reading
+  multiple JSON files
+- **Reproduce a run** — config snapshot + data fingerprint + `random_state`
+  (now seeded) is sufficient to replay
+- **Roll back** — runs stored in versioned directories
+  (`trained_models/mlp/1.2.0/`) instead of overwriting a single directory
+- **Query** — `python -m iaq4j runs --model mlp` lists all runs with metrics
+
+**Requirements:**
+
+- [ ] `TrainingRun` dataclass that unifies all per-run state into one object
+- [ ] Versioned artifact directories (`trained_models/mlp/1.2.0/`) — each run preserved, not overwritten
+- [ ] `TrainingRun.save()` / `TrainingRun.load()` for serialization to/from a run directory
+- [ ] `PipelineResult` replaced by or wraps `TrainingRun`
+- [ ] `python -m iaq4j runs` CLI command to list, compare, and diff runs
+- [ ] `IAQPredictor.load_model()` updated to load from versioned directories
+- [ ] Rollback support: `python -m iaq4j activate --model mlp --version 1.1.0`
+
+---
+
 ## Sensor Onboarding
 
 ### LLM-driven semantic field mapping from firmware API to sensor profile — P1
