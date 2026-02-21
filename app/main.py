@@ -6,12 +6,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 import os
+import uuid
 from datetime import datetime
+from pathlib import Path
+from typing import Dict
 
 from app.models import IAQPredictor
 from app.inference import InferenceEngine
 from app.schemas import (
-    SensorReading, IAQResponse, ModelInfo, HealthResponse, ModelSelection
+    SensorReading, IAQResponse, ModelInfo, HealthResponse, ModelSelection,
+    SensorRegisterRequest, SensorRegisterResponse, FieldMatchResponse,
+    SensorConfirmRequest, SensorConfirmResponse,
 )
 from app.config import settings
 from app.database import influx_manager
@@ -24,6 +29,9 @@ logger = logging.getLogger(__name__)
 predictors = {}
 inference_engines = {}
 active_model = settings.DEFAULT_MODEL
+
+# Transient storage for proposed field mappings (not persisted)
+_pending_mappings: Dict[str, "MappingResult"] = {}
 
 
 MODEL_PATHS = {
@@ -104,7 +112,7 @@ app.add_middleware(
         "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
 
@@ -355,3 +363,107 @@ async def check_sensor_health():
         'model': active_model,
         'analysis': analysis
     }
+
+
+# =========================================================================
+# Sensor registration (field mapping API)
+# =========================================================================
+
+@app.post("/sensors/register", response_model=SensorRegisterResponse, dependencies=auth)
+async def register_sensor(req: SensorRegisterRequest):
+    """Run the field mapper on submitted field names and return a proposed mapping."""
+    from app.field_mapper import FieldMapper, MappingResult
+    from app.profiles import get_sensor_profile
+
+    profile = get_sensor_profile()
+    mapper = FieldMapper(profile)
+
+    result = mapper.map_fields(
+        req.fields,
+        sample_values=req.sample_values,
+        backend=req.backend,
+    )
+
+    mapping_id = str(uuid.uuid4())
+    _pending_mappings[mapping_id] = result
+
+    return SensorRegisterResponse(
+        mapping_id=mapping_id,
+        status="proposed",
+        mapping=[
+            FieldMatchResponse(
+                source_field=m.source_field,
+                target_feature=m.target_feature,
+                target_quantity=m.target_quantity,
+                confidence=m.confidence,
+                method=m.method,
+            )
+            for m in result.matches
+        ],
+        unresolved=result.unresolved,
+    )
+
+
+@app.post("/sensors/register/{mapping_id}/confirm", response_model=SensorConfirmResponse, dependencies=auth)
+async def confirm_sensor_mapping(mapping_id: str, req: SensorConfirmRequest = None):
+    """Persist a proposed mapping to model_config.yaml."""
+    import yaml
+
+    if mapping_id not in _pending_mappings:
+        raise HTTPException(status_code=404, detail=f"Mapping '{mapping_id}' not found or expired")
+
+    result = _pending_mappings.pop(mapping_id)
+
+    # Build field_mapping dict
+    field_mapping = {m.source_field: m.target_feature for m in result.matches}
+
+    # Apply overrides
+    if req and req.overrides:
+        field_mapping.update(req.overrides)
+
+    # Save to model_config.yaml
+    config_path = Path(__file__).resolve().parent.parent / "model_config.yaml"
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+
+    cfg.setdefault("sensor", {})["field_mapping"] = field_mapping
+
+    with open(config_path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+    logger.info("Field mapping saved: %s", field_mapping)
+
+    return SensorConfirmResponse(status="confirmed", field_mapping=field_mapping)
+
+
+@app.get("/sensors", dependencies=auth)
+async def get_sensor_mapping():
+    """Return the active field mapping from config."""
+    cfg = settings.load_model_config()
+    field_mapping = cfg.get("sensor", {}).get("field_mapping", {})
+    return {
+        "sensor_type": cfg.get("sensor", {}).get("type", "unknown"),
+        "field_mapping": field_mapping,
+    }
+
+
+@app.delete("/sensors/mapping", dependencies=auth)
+async def delete_sensor_mapping():
+    """Remove the active field mapping from model_config.yaml."""
+    import yaml
+
+    config_path = Path(__file__).resolve().parent.parent / "model_config.yaml"
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+
+    sensor = cfg.get("sensor", {})
+    if "field_mapping" not in sensor:
+        return {"status": "no_mapping", "message": "No field mapping configured"}
+
+    del sensor["field_mapping"]
+
+    with open(config_path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+    logger.info("Field mapping removed from config")
+    return {"status": "removed"}

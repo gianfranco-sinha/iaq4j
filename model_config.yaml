@@ -95,6 +95,11 @@ sensor:
     voc_resistance: [1000, 2000000]  # Ohm (<1kΩ = sensor fault, >2MΩ = unreasonable)
     iaq_accuracy: [2, 3]             # BSEC accuracy (0=unreliable, 1=low, 2=medium, 3=high)
 
+# Field mapping — Tier 3 LLM backend configuration
+field_mapping:
+  ollama_model: "phi3:mini"              # Ollama model for field mapping (small + structured output)
+  ollama_url: "http://localhost:11434"    # Ollama server URL
+
 # IAQ standard — selects the target scale and category breakpoints
 iaq_standard:
   type: bsec                         # Registered IAQStandard name (see app/builtin_profiles.py)

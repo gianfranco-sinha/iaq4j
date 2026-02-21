@@ -99,8 +99,80 @@ def create_parser():
         action="store_true",
         help="Save mapping to model_config.yaml under sensor.field_mapping",
     )
+    map_parser.add_argument(
+        "--backend",
+        choices=["fuzzy", "ollama"],
+        default="fuzzy",
+        help="Mapping backend: fuzzy (Tier 1+2) or ollama (adds Tier 3 LLM) (default: fuzzy)",
+    )
+    map_parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip interactive confirmation (accept mapping automatically)",
+    )
 
     return parser
+
+
+def _interactive_confirm(result, profile):
+    """Prompt user to accept, reject, or edit proposed field mappings.
+
+    Returns:
+        List of confirmed FieldMatch objects, or None if user aborts.
+    """
+    try:
+        choice = input("\nAccept this mapping? [Y/n/e(dit)] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    if choice in ("", "y", "yes"):
+        return result.matches
+
+    if choice in ("n", "no"):
+        return None
+
+    if choice not in ("e", "edit"):
+        print(f"Unknown option: {choice}")
+        return None
+
+    # Edit mode: walk through each match
+    available_features = list(profile.feature_quantities.keys())
+    confirmed = []
+    for m in result.matches:
+        try:
+            resp = input(
+                f"  {m.source_field} -> {m.target_feature} ({m.confidence:.0%} {m.method})"
+                f"  [a(ccept)/o(verride)/s(kip)] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        if resp in ("", "a", "accept"):
+            confirmed.append(m)
+        elif resp in ("s", "skip"):
+            continue
+        elif resp in ("o", "override"):
+            print(f"    Available features: {', '.join(available_features)}")
+            try:
+                new_target = input("    Enter target feature name: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return None
+            if new_target in available_features:
+                from app.field_mapper import FieldMatch
+                confirmed.append(FieldMatch(
+                    source_field=m.source_field,
+                    target_quantity=profile.feature_quantities[new_target],
+                    target_feature=new_target,
+                    confidence=1.0,
+                    method="manual",
+                ))
+            else:
+                print(f"    Unknown feature '{new_target}', skipping.")
+        else:
+            print(f"    Unknown option '{resp}', accepting.")
+            confirmed.append(m)
+
+    return confirmed
 
 
 def main():
@@ -202,11 +274,28 @@ def main():
         mapper = FieldMapper(profile, fuzzy_threshold=args.threshold)
 
         headers, sample_values = FieldMapper.sample_csv(args.source, n_rows=args.sample_rows)
-        result = mapper.map_fields(headers, sample_values=sample_values)
+        result = mapper.map_fields(
+            headers, sample_values=sample_values, backend=args.backend,
+        )
 
         print(f"\nField mapping for: {args.source}")
-        print(f"Sensor profile: {profile.name}\n")
+        print(f"Sensor profile: {profile.name}")
+        if args.backend == "ollama":
+            print("Backend: ollama (Tier 1+2+3)")
+        print()
         print(mapper.format_report(result))
+
+        if not result.matches:
+            print("\nNo matches found.")
+            return
+
+        # Interactive confirmation (skip with --yes)
+        if not args.yes:
+            confirmed_matches = _interactive_confirm(result, profile)
+            if confirmed_matches is None:
+                print("\nMapping aborted.")
+                return
+            result.matches = confirmed_matches
 
         if args.save and result.matches:
             import yaml

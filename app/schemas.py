@@ -165,3 +165,50 @@ class HealthResponse(BaseModel):
 class ModelSelection(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     model_type: str = Field(..., description="Model type to activate")
+
+
+# ---------------------------------------------------------------------------
+# Sensor registration (field mapping API)
+# ---------------------------------------------------------------------------
+
+class SensorRegisterRequest(BaseModel):
+    """Request body for POST /sensors/register."""
+    source_type: str = Field(
+        "csv_headers",
+        description="Source type: 'csv_headers' or 'example_payload'",
+    )
+    fields: List[str] = Field(..., description="List of source field names to map")
+    sample_values: Optional[Dict[str, List[float]]] = Field(
+        None, description="Sample values per field for range validation",
+    )
+    backend: str = Field("fuzzy", description="Mapping backend: 'fuzzy' or 'ollama'")
+
+
+class FieldMatchResponse(BaseModel):
+    """A single field mapping in the registration response."""
+    source_field: str
+    target_feature: str
+    target_quantity: str
+    confidence: float
+    method: str
+
+
+class SensorRegisterResponse(BaseModel):
+    """Response from POST /sensors/register."""
+    mapping_id: str
+    status: str = "proposed"
+    mapping: List[FieldMatchResponse]
+    unresolved: List[str]
+
+
+class SensorConfirmRequest(BaseModel):
+    """Request body for POST /sensors/register/{mapping_id}/confirm."""
+    overrides: Optional[Dict[str, str]] = Field(
+        None, description="Manual overrides: {source_field: target_feature}",
+    )
+
+
+class SensorConfirmResponse(BaseModel):
+    """Response from POST /sensors/register/{mapping_id}/confirm."""
+    status: str = "confirmed"
+    field_mapping: Dict[str, str]

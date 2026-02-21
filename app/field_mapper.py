@@ -1,9 +1,10 @@
 # ============================================================================
 # File: app/field_mapper.py
-# Tiered field mapping engine: exact match → fuzzy match.
+# Tiered field mapping engine: exact match → fuzzy match → LLM match.
 # Maps CSV column headers (or API field names) to iaq4j internal features.
 # ============================================================================
 import csv
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ class FieldMatch:
     target_quantity: str
     target_feature: str
     confidence: float
-    method: str  # "exact" or "fuzzy"
+    method: str  # "exact", "fuzzy", or "llm"
     inferred_unit: Optional[str] = None
 
 
@@ -74,6 +75,7 @@ class FieldMapper:
         self,
         source_fields: List[str],
         sample_values: Optional[Dict[str, List[float]]] = None,
+        backend: str = "fuzzy",
     ) -> MappingResult:
         """Map source field names to iaq4j features.
 
@@ -81,6 +83,8 @@ class FieldMapper:
             source_fields: column headers from CSV or API payload.
             sample_values: optional dict of field→sample values for range
                 validation during fuzzy matching.
+            backend: ``"fuzzy"`` (default, Tier 1+2 only) or ``"ollama"``
+                (adds Tier 3 LLM matching for unresolved fields).
 
         Returns:
             MappingResult with matches, unresolved fields, and timestamp column.
@@ -122,6 +126,19 @@ class FieldMapper:
                 matched_quantities.add(match.target_quantity)
             else:
                 result.unresolved.append(src)
+
+        # Tier 3: LLM match for remaining unresolved fields
+        if backend == "ollama" and result.unresolved:
+            llm_matches = self._ollama_match(
+                result.unresolved, sample_values, matched_quantities, result.matches,
+            )
+            for m in llm_matches:
+                result.matches.append(m)
+                matched_quantities.add(m.target_quantity)
+            result.unresolved = [
+                u for u in result.unresolved
+                if u not in {m.source_field for m in llm_matches}
+            ]
 
         return result
 
@@ -187,6 +204,146 @@ class FieldMapper:
             confidence=confidence,
             method="fuzzy",
         )
+
+    def _ollama_match(
+        self,
+        unresolved: List[str],
+        sample_values: Optional[Dict[str, List[float]]],
+        matched_quantities: set,
+        existing_matches: List[FieldMatch],
+    ) -> List[FieldMatch]:
+        """Tier 3: Use Ollama LLM to resolve remaining fields.
+
+        Sends a single prompt with all unresolved field names, sample values,
+        and quantity definitions. Returns FieldMatch objects for any fields
+        the LLM can map.
+        """
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("httpx not available — skipping LLM field mapping")
+            return []
+
+        from app.config import settings
+        cfg = settings.load_model_config()
+        fm_cfg = cfg.get("field_mapping", {})
+        model = fm_cfg.get("ollama_model", "phi3:mini")
+        base_url = fm_cfg.get("ollama_url", "http://localhost:11434")
+
+        # Build quantity definitions for the prompt
+        available_quantities = []
+        for feat, qty_name in self.profile.feature_quantities.items():
+            if qty_name in matched_quantities:
+                continue
+            q = get_quantity(qty_name)
+            available_quantities.append({
+                "feature_name": feat,
+                "quantity": qty_name,
+                "unit": q.canonical_unit,
+                "description": q.description,
+                "aliases": q.aliases,
+                "valid_range": list(q.valid_range) if q.valid_range else None,
+            })
+
+        if not available_quantities:
+            return []
+
+        # Build sample value summaries
+        sample_info = {}
+        for field_name in unresolved:
+            if sample_values and field_name in sample_values:
+                vals = sample_values[field_name]
+                if vals:
+                    sample_info[field_name] = {
+                        "min": round(min(vals), 2),
+                        "max": round(max(vals), 2),
+                        "mean": round(sum(vals) / len(vals), 2),
+                        "count": len(vals),
+                    }
+
+        # Context: what was already matched
+        already_matched = [
+            {"source": m.source_field, "target": m.target_feature}
+            for m in existing_matches
+        ]
+
+        prompt = (
+            "You are a sensor data field mapper. Match source field names to "
+            "physical quantities from a sensor profile.\n\n"
+            f"Already matched fields (for context): {json.dumps(already_matched)}\n\n"
+            f"Unresolved source fields: {json.dumps(unresolved)}\n\n"
+            f"Sample value statistics: {json.dumps(sample_info)}\n\n"
+            f"Available target quantities: {json.dumps(available_quantities)}\n\n"
+            "For each unresolved field, determine if it maps to one of the "
+            "available quantities. Consider the field name, aliases, units, "
+            "valid ranges, and sample values.\n\n"
+            "Return ONLY a JSON object with this structure:\n"
+            '{"mappings": [{"source": "<field_name>", "quantity": "<quantity_name>", '
+            '"feature": "<feature_name>", "confidence": <0.0-1.0>, '
+            '"reasoning": "<brief explanation>"}]}\n\n'
+            "Only include fields you are confident about (confidence >= 0.5). "
+            "If a field doesn't match any quantity, omit it."
+        )
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post(
+                    f"{base_url}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "format": "json",
+                        "stream": False,
+                    },
+                )
+                resp.raise_for_status()
+                body = resp.json()
+        except (httpx.HTTPError, httpx.ConnectError, OSError) as exc:
+            logger.warning("Ollama unreachable (%s) — skipping LLM field mapping", exc)
+            return []
+
+        # Parse LLM response
+        try:
+            llm_output = json.loads(body.get("response", "{}"))
+            mappings = llm_output.get("mappings", [])
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to parse Ollama response as JSON")
+            return []
+
+        # Convert to FieldMatch objects
+        valid_features = {feat for feat in self.profile.feature_quantities}
+        valid_quantities = {qty for qty in self.profile.feature_quantities.values()}
+        results: List[FieldMatch] = []
+
+        for m in mappings:
+            source = m.get("source", "")
+            quantity = m.get("quantity", "")
+            feature = m.get("feature", "")
+            confidence = m.get("confidence", 0.0)
+
+            if source not in unresolved:
+                continue
+            if quantity not in valid_quantities or feature not in valid_features:
+                continue
+            if quantity in matched_quantities:
+                continue
+            if confidence < 0.5:
+                continue
+
+            results.append(FieldMatch(
+                source_field=source,
+                target_quantity=quantity,
+                target_feature=feature,
+                confidence=confidence,
+                method="llm",
+            ))
+            matched_quantities.add(quantity)
+
+        if results:
+            logger.info("LLM resolved %d field(s): %s", len(results),
+                        ", ".join(f"{m.source_field}→{m.target_feature}" for m in results))
+
+        return results
 
     @staticmethod
     def sample_csv(path: str, n_rows: int = 10) -> Tuple[List[str], Dict[str, List[float]]]:
