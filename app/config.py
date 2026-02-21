@@ -142,6 +142,11 @@ class Settings(BaseSettings):
             defaults["valid_ranges"].update(sensor_cfg["valid_ranges"])
         return defaults
 
+    def get_prior_variables_config(self) -> Dict[str, Any]:
+        """Get user-declared prior variables from bnn.prior_variables config."""
+        config = self.load_model_config()
+        return config.get("bnn", {}).get("prior_variables", {})
+
     def get_model_config(self, model_type: str) -> Dict[str, Any]:
         """Get configuration for a specific model type."""
         config = self.load_model_config()

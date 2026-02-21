@@ -68,6 +68,19 @@ bnn:
   kl_weight: 1.0                 # KL divergence weight in ELBO loss
   # Input parameters
   input_dim: 6                   # Number of input features
+  # User-declared prior variables — external signals that shift the predictive
+  # distribution via Gaussian conjugate update (no retraining required).
+  prior_variables:
+    presence:
+      description: "mm-wave radar body detection"
+      type: boolean
+      values:
+        "true":
+          target_shift: 40.0     # Expected IAQ increase when body present
+          prior_std: 30.0        # Uncertainty (smaller = stronger prior)
+        "false":
+          target_shift: 0.0
+          prior_std: 100.0       # Weak prior when no body
 
 # Sensor configuration — valid ranges for outlier filtering during preprocessing
 sensor:

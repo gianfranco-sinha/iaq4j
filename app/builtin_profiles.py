@@ -126,8 +126,86 @@ class BSECStandard(IAQStandard):
         ]
 
 
+class SPS30Profile(SensorProfile):
+    """Sensirion SPS30 particulate matter sensor."""
+
+    @property
+    def name(self) -> str:
+        return "sps30"
+
+    @property
+    def raw_features(self) -> List[str]:
+        return ["pm1_0", "pm2_5", "pm4_0", "pm10"]
+
+    @property
+    def feature_quantities(self) -> Dict[str, str]:
+        return {
+            "pm1_0": "pm1_0",
+            "pm2_5": "pm2_5",
+            "pm4_0": "pm4_0",
+            "pm10": "pm10",
+        }
+
+    @property
+    def engineered_feature_names(self) -> List[str]:
+        return ["pm25_pm10_ratio", "pm1_pm25_ratio"]
+
+    def engineer_features(
+        self, raw: np.ndarray, baselines: Optional[Dict[str, float]] = None
+    ) -> np.ndarray:
+        pm1_idx = self.raw_features.index("pm1_0")
+        pm25_idx = self.raw_features.index("pm2_5")
+        pm10_idx = self.raw_features.index("pm10")
+
+        pm25_pm10_ratio = raw[:, pm25_idx] / np.maximum(raw[:, pm10_idx], 0.1)
+        pm1_pm25_ratio = raw[:, pm1_idx] / np.maximum(raw[:, pm25_idx], 0.1)
+
+        return np.column_stack(
+            [raw, pm25_pm10_ratio.reshape(-1, 1), pm1_pm25_ratio.reshape(-1, 1)]
+        )
+
+    def engineer_features_single(
+        self, reading: Dict[str, float], baselines: Optional[Dict[str, float]] = None
+    ) -> np.ndarray:
+        raw_vals = [reading[f] for f in self.raw_features]
+
+        pm25_pm10_ratio = reading["pm2_5"] / max(reading["pm10"], 0.1)
+        pm1_pm25_ratio = reading["pm1_0"] / max(reading["pm2_5"], 0.1)
+
+        return np.array(raw_vals + [pm25_pm10_ratio, pm1_pm25_ratio])
+
+
+class EPAAQIStandard(IAQStandard):
+    """US EPA Air Quality Index — 0-500 scale with 6 categories."""
+
+    @property
+    def name(self) -> str:
+        return "epa_aqi"
+
+    @property
+    def target_column(self) -> str:
+        return "aqi"
+
+    @property
+    def scale_range(self) -> Tuple[float, float]:
+        return (0.0, 500.0)
+
+    @property
+    def categories(self) -> List[Tuple[float, str]]:
+        return [
+            (50, "Good"),
+            (100, "Moderate"),
+            (150, "Unhealthy for Sensitive Groups"),
+            (200, "Unhealthy"),
+            (300, "Very Unhealthy"),
+            (float("inf"), "Hazardous"),
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Register built-in profiles
 # ---------------------------------------------------------------------------
 register_sensor("bme680", BME680Profile)
+register_sensor("sps30", SPS30Profile)
 register_standard("bsec", BSECStandard)
+register_standard("epa_aqi", EPAAQIStandard)

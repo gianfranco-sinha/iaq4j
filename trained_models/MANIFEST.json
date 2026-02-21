@@ -26,7 +26,7 @@
       "git_commit": "9afac2c",
       "version": "mlp-v2",
       "model_type": "mlp",
-      "is_active": true
+      "is_active": false
     },
     {
       "timestamp": "2026-02-18T22:58:01.842964",
@@ -40,6 +40,62 @@
       "git_commit": "9afac2c",
       "version": "kan-v1",
       "model_type": "kan",
+      "is_active": true
+    },
+    {
+      "timestamp": "2026-02-20T10:06:51.310534",
+      "data_fingerprint": "7c6959ce1b7b90b0528a4dca15267353da474c797060a3e821a01062a1a3011b",
+      "model_dir": "trained_models/mlp",
+      "metrics": {
+        "mae": 120.40445258987842,
+        "rmse": 143.7618297664235,
+        "r2": -0.19630598370538932
+      },
+      "git_commit": "fd65355",
+      "version": "mlp-v3",
+      "model_type": "mlp",
+      "is_active": false
+    },
+    {
+      "timestamp": "2026-02-20T10:10:16.006527",
+      "data_fingerprint": "7c6959ce1b7b90b0528a4dca15267353da474c797060a3e821a01062a1a3011b",
+      "model_dir": "trained_models/mlp",
+      "metrics": {
+        "mae": 136.82117773602505,
+        "rmse": 168.56667123903878,
+        "r2": -0.6447447655747576
+      },
+      "git_commit": "fd65355",
+      "version": "mlp-v4",
+      "model_type": "mlp",
+      "is_active": false
+    },
+    {
+      "timestamp": "2026-02-20T19:13:28.414294",
+      "data_fingerprint": "77a618b990b7c190f42c2c36558787e4ad4747d19105b2bd68b35ebd0f06ae7c",
+      "model_dir": "trained_models/mlp",
+      "metrics": {
+        "mae": 115.90690222383829,
+        "rmse": 141.01953322696934,
+        "r2": -0.151101546003219
+      },
+      "git_commit": "3544cb0",
+      "version": "mlp-v5",
+      "model_type": "mlp",
+      "is_active": false
+    },
+    {
+      "timestamp": "2026-02-20T19:13:45.526257",
+      "data_fingerprint": "7c6959ce1b7b90b0528a4dca15267353da474c797060a3e821a01062a1a3011b",
+      "model_dir": "trained_models/mlp",
+      "metrics": {
+        "mae": 121.18858621003636,
+        "rmse": 150.41120752045754,
+        "r2": -0.3095301058527178
+      },
+      "git_commit": "3544cb0",
+      "version": "mlp-v6",
+      "model_type": "mlp",
       "is_active": true
     }
   ]

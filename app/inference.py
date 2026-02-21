@@ -7,11 +7,111 @@ Handles batch processing, streaming, and real-time predictions.
 """
 
 import logging
-from typing import List, Dict, Optional
+import math
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
+
+
+def _resolve_prior_variable(
+    var_name: str, value: float, var_config: dict
+) -> Optional[dict]:
+    """Resolve a prior variable value to its configured shift and std.
+
+    For boolean variables, value >= 0.5 maps to "true", else "false".
+    Returns dict with target_shift, prior_std, state, description or None.
+    """
+    var_type = var_config.get("type", "boolean")
+    values_map = var_config.get("values", {})
+
+    if var_type == "boolean":
+        state = "true" if value >= 0.5 else "false"
+    else:
+        state = str(value)
+
+    state_config = values_map.get(state)
+    if state_config is None:
+        logger.warning(
+            "Prior variable '%s' has no config for state '%s' — skipped",
+            var_name, state,
+        )
+        return None
+
+    return {
+        "variable": var_name,
+        "value": value,
+        "state": state,
+        "target_shift": float(state_config.get("target_shift", 0.0)),
+        "prior_std": float(state_config.get("prior_std", 100.0)),
+        "description": var_config.get("description"),
+    }
+
+
+def _apply_bayesian_update(
+    model_mean: float,
+    model_std: float,
+    prior_variables: Dict[str, float],
+) -> Optional[dict]:
+    """Apply sequential Gaussian conjugate update from prior variables.
+
+    Each prior variable contributes N(model_mean + shift, prior_std^2).
+    The conjugate formula combines model likelihood with each prior:
+        precision_post = 1/sigma_model^2 + 1/sigma_prior^2
+        mu_post = (mu_model/sigma_model^2 + mu_prior/sigma_prior^2) / precision_post
+
+    Returns dict with pre/post mean+std and list of applied effects, or None.
+    """
+    prior_config = settings.get_prior_variables_config()
+    if not prior_config or not prior_variables:
+        return None
+
+    pre_mean = model_mean
+    pre_std = model_std
+
+    mu = model_mean
+    sigma = model_std
+    applied = []
+
+    for var_name, value in prior_variables.items():
+        var_cfg = prior_config.get(var_name)
+        if var_cfg is None:
+            logger.warning("Unknown prior variable '%s' — skipped", var_name)
+            continue
+
+        resolved = _resolve_prior_variable(var_name, value, var_cfg)
+        if resolved is None:
+            continue
+
+        shift = resolved["target_shift"]
+        prior_std = resolved["prior_std"]
+
+        if prior_std <= 0 or sigma <= 0:
+            continue
+
+        # Gaussian conjugate update
+        mu_prior = mu + shift
+        prec_model = 1.0 / (sigma ** 2)
+        prec_prior = 1.0 / (prior_std ** 2)
+        prec_post = prec_model + prec_prior
+        mu = (mu * prec_model + mu_prior * prec_prior) / prec_post
+        sigma = math.sqrt(1.0 / prec_post)
+
+        applied.append(resolved)
+
+    if not applied:
+        return None
+
+    return {
+        "pre_mean": pre_mean,
+        "pre_std": pre_std,
+        "post_mean": mu,
+        "post_std": sigma,
+        "variables_applied": applied,
+    }
 
 
 class InferenceEngine:
@@ -54,13 +154,16 @@ class InferenceEngine:
 
     def predict_single(self, readings: dict = None,
                        include_uncertainty: bool = True,
-                       n_mc_samples: int = 10, **kwargs) -> Dict:
+                       n_mc_samples: int = 10,
+                       prior_variables: Dict[str, float] = None,
+                       **kwargs) -> Dict:
         """Single prediction with prior, uncertainty, and structured output.
 
         Args:
             readings: sensor readings dict.
             include_uncertainty: whether to run MC dropout for uncertainty.
             n_mc_samples: number of MC dropout forward passes.
+            prior_variables: external signals for Bayesian conjugate update.
         """
         if readings is None:
             readings = kwargs
@@ -74,6 +177,37 @@ class InferenceEngine:
         # Attach prior
         if prior is not None:
             result["prior"] = prior
+
+        # Apply Bayesian conjugate update from prior variables
+        if (prior_variables
+                and result.get('status') == 'ready'
+                and result.get('iaq') is not None):
+            predicted = result.get("predicted", {})
+            unc = predicted.get("uncertainty")
+            if unc and unc.get("std") and unc["std"] > 0:
+                update = _apply_bayesian_update(
+                    predicted["mean"], unc["std"], prior_variables,
+                )
+                if update is not None:
+                    from app.profiles import get_iaq_standard
+                    standard = get_iaq_standard()
+
+                    new_iaq = standard.clamp(update["post_mean"])
+                    new_category = standard.categorize(new_iaq)
+                    new_std = update["post_std"]
+
+                    result["iaq"] = new_iaq
+                    result["category"] = new_category
+                    result["predicted"]["mean"] = new_iaq
+                    result["predicted"]["category"] = new_category
+                    result["predicted"]["uncertainty"]["std"] = new_std
+                    result["predicted"]["uncertainty"]["ci_lower"] = standard.clamp(
+                        new_iaq - 1.96 * new_std
+                    )
+                    result["predicted"]["uncertainty"]["ci_upper"] = standard.clamp(
+                        new_iaq + 1.96 * new_std
+                    )
+                    result["bayesian_update"] = update
 
         # Add to history if prediction was successful
         if result.get('status') == 'ready' and result.get('iaq') is not None:
@@ -116,7 +250,9 @@ class InferenceEngine:
         return [self.predict_single(reading) for reading in readings]
 
     def predict_with_uncertainty(self, readings: dict = None,
-                                 n_samples: int = 10, **kwargs) -> Dict:
+                                 n_samples: int = 10,
+                                 prior_variables: Dict[str, float] = None,
+                                 **kwargs) -> Dict:
         """Prediction with uncertainty estimation.
 
         Delegates to predict_single with MC dropout enabled.
@@ -127,6 +263,7 @@ class InferenceEngine:
             readings=readings or kwargs,
             include_uncertainty=True,
             n_mc_samples=n_samples,
+            prior_variables=prior_variables,
         )
 
     def get_statistics(self) -> Dict:

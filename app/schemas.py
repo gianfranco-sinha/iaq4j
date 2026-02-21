@@ -1,7 +1,7 @@
 # ============================================================================
 # File: app/schemas.py
 # ============================================================================
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
@@ -14,6 +14,9 @@ class SensorReading(BaseModel):
     """
     readings: Optional[Dict[str, float]] = Field(
         None, description="Sensor readings keyed by feature name"
+    )
+    prior_variables: Optional[Dict[str, float]] = Field(
+        None, description="External prior variables (e.g. {\"presence\": 1.0})"
     )
     iaq_actual: Optional[float] = Field(
         None, description="Actual IAQ score from sensor (e.g. BSEC IAQ)"
@@ -62,6 +65,25 @@ class SensorReading(BaseModel):
 # ---------------------------------------------------------------------------
 # Bayesian inference response structure
 # ---------------------------------------------------------------------------
+
+class PriorVariableEffect(BaseModel):
+    """Effect of a single prior variable on the predictive distribution."""
+    variable: str
+    value: float
+    state: str = Field(description="Resolved state (e.g. 'true' or 'false')")
+    target_shift: float
+    prior_std: float
+    description: Optional[str] = None
+
+
+class BayesianUpdate(BaseModel):
+    """Result of applying Gaussian conjugate update from prior variables."""
+    pre_mean: float
+    pre_std: float
+    post_mean: float
+    post_std: float
+    variables_applied: List[PriorVariableEffect]
+
 
 class Observation(BaseModel):
     """Direct sensor measurements — the evidence conditioning our inference."""
@@ -123,6 +145,7 @@ class IAQResponse(BaseModel):
     predicted: Optional[Predicted] = None
     prior: Optional[Prior] = None
     inference: Optional[InferenceMetadata] = None
+    bayesian_update: Optional[BayesianUpdate] = None
 
 
 class ModelInfo(BaseModel):

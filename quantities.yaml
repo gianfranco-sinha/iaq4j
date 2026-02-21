@@ -69,12 +69,36 @@ co2:
   aliases: ["carbon_dioxide", "co2_ppm", "co2_concentration"]
   alternate_units: {}
 
+pm1_0:
+  canonical_unit: "µg/m³"
+  description: "Ultrafine particulate matter (diameter ≤ 1.0 µm)"
+  valid_range: [0, 1000]
+  kind: sensor_feature
+  aliases: ["pm1", "pm_1_0"]
+  alternate_units: {}
+
 pm2_5:
   canonical_unit: "µg/m³"
   description: "Fine particulate matter (diameter ≤ 2.5 µm)"
   valid_range: [0, 500]
   kind: sensor_feature
   aliases: ["pm25", "pm_2_5", "fine_dust", "particulate_matter_25"]
+  alternate_units: {}
+
+pm4_0:
+  canonical_unit: "µg/m³"
+  description: "Coarse fine particulate matter (diameter ≤ 4.0 µm)"
+  valid_range: [0, 1000]
+  kind: sensor_feature
+  aliases: ["pm4", "pm_4_0"]
+  alternate_units: {}
+
+pm10:
+  canonical_unit: "µg/m³"
+  description: "Coarse particulate matter (diameter ≤ 10 µm)"
+  valid_range: [0, 1000]
+  kind: sensor_feature
+  aliases: ["pm_10", "coarse_dust"]
   alternate_units: {}
 
 tvoc:
