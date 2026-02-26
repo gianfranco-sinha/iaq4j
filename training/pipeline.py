@@ -24,11 +24,22 @@ from training.utils import (
     evaluate_model,
     find_contiguous_segments,
     get_device,
+    patch_config_with_merkle_hash,
     patch_config_with_version,
     save_trained_model,
     seed_everything,
     train_model,
     update_central_manifest,
+)
+from training.merkle import (
+    build_sensor_node,
+    build_raw_data_node,
+    build_cleansed_data_node,
+    build_preprocessed_data_node,
+    build_split_data_node,
+    build_trained_model_node,
+    compute_scaler_hash,
+    compute_weights_hash,
 )
 
 logger = logging.getLogger("training.pipeline")
@@ -67,7 +78,13 @@ class Issue:
 class PreprocessingReport:
     issues: List[Issue] = field(default_factory=list)
 
-    def add(self, severity: IssueSeverity, stage: str, message: str, rows_affected: int = None):
+    def add(
+        self,
+        severity: IssueSeverity,
+        stage: str,
+        message: str,
+        rows_affected: int = None,
+    ):
         self.issues.append(Issue(severity, stage, message, rows_affected))
 
     @property
@@ -91,7 +108,10 @@ class PreprocessingReport:
         infos = [i for i in self.issues if i.severity == IssueSeverity.INFO]
         logger.info(
             "[preprocessing_report] %d issue(s): %d error, %d warning, %d info",
-            len(self.issues), len(errors), len(warnings), len(infos),
+            len(self.issues),
+            len(errors),
+            len(warnings),
+            len(infos),
         )
         for issue in self.issues:
             log_fn = {
@@ -130,8 +150,12 @@ class PipelineResult:
     training_history: Dict
     model_dir: Path
     stage_results: List[StageResult]
-    preprocessing_report: PreprocessingReport = field(default_factory=PreprocessingReport)
+    preprocessing_report: PreprocessingReport = field(
+        default_factory=PreprocessingReport
+    )
     version: str = ""
+    merkle_root_hash: str = ""
+    artifact_paths: List[Path] = field(default_factory=list)
 
 
 class PipelineError(Exception):
@@ -173,9 +197,12 @@ class TrainingPipeline:
         lr_scheduler_patience: int = None,
         lr_scheduler_factor: float = None,
         output_dir: str = None,
+        on_epoch: Optional[Callable] = None,
     ):
         if model_type not in MODEL_REGISTRY:
-            raise ValueError(f"Unsupported model type: {model_type}. Must be one of {list(MODEL_REGISTRY)}")
+            raise ValueError(
+                f"Unsupported model type: {model_type}. Must be one of {list(MODEL_REGISTRY)}"
+            )
 
         tcfg = settings.get_training_config()
 
@@ -184,12 +211,26 @@ class TrainingPipeline:
         self._epochs = epochs if epochs is not None else tcfg["epochs"]
         self._window_size = window_size
         self._test_size = test_size if test_size is not None else tcfg["test_size"]
-        self._random_state = random_state if random_state is not None else tcfg["random_state"]
-        self._min_samples = min_samples if min_samples is not None else tcfg["min_samples"]
+        self._random_state = (
+            random_state if random_state is not None else tcfg["random_state"]
+        )
+        self._min_samples = (
+            min_samples if min_samples is not None else tcfg["min_samples"]
+        )
         self._batch_size = batch_size if batch_size is not None else tcfg["batch_size"]
-        self._learning_rate = learning_rate if learning_rate is not None else tcfg["learning_rate"]
-        self._lr_scheduler_patience = lr_scheduler_patience if lr_scheduler_patience is not None else tcfg["lr_scheduler_patience"]
-        self._lr_scheduler_factor = lr_scheduler_factor if lr_scheduler_factor is not None else tcfg["lr_scheduler_factor"]
+        self._learning_rate = (
+            learning_rate if learning_rate is not None else tcfg["learning_rate"]
+        )
+        self._lr_scheduler_patience = (
+            lr_scheduler_patience
+            if lr_scheduler_patience is not None
+            else tcfg["lr_scheduler_patience"]
+        )
+        self._lr_scheduler_factor = (
+            lr_scheduler_factor
+            if lr_scheduler_factor is not None
+            else tcfg["lr_scheduler_factor"]
+        )
         self._output_dir = self._resolve_output_dir(output_dir)
         self._sensor_cfg = settings.get_sensor_config()
         self._sensor_profile = get_sensor_profile()
@@ -203,12 +244,16 @@ class TrainingPipeline:
         self._on_stage_enter_callbacks: List[StageCallback] = []
         self._on_stage_complete_callbacks: List[StageCallback] = []
         self._on_error_callbacks: List[ErrorCallback] = []
+        self._on_epoch_callback: Optional[Callable] = on_epoch
 
         # Data provenance tracking
         self._data_fingerprint: Optional[str] = None
         self._feature_stats: Optional[Dict] = None
         self._target_stats: Optional[Dict] = None
+        self._schema_fp: Optional[str] = None
         self._version: str = ""
+        self._merkle_root = None
+        self._raw_row_count: Optional[int] = None
 
         # Inter-stage data (populated as stages execute)
         self._df = None
@@ -318,6 +363,7 @@ class TrainingPipeline:
         t0 = time.monotonic()
         self._df = self._source.fetch()
         n_raw = len(self._df)
+        self._raw_row_count = n_raw
         report = self._report
 
         # ── Check: sufficient data ────────────────────────────────────
@@ -326,45 +372,63 @@ class TrainingPipeline:
                 f"Insufficient data: got {n_raw} samples, need at least {self._min_samples}"
             )
         if n_raw < self._min_samples * 2:
-            report.add(IssueSeverity.WARNING, "ingestion",
-                       f"Low sample count ({n_raw}), recommended >= {self._min_samples * 2}",
-                       rows_affected=n_raw)
+            report.add(
+                IssueSeverity.WARNING,
+                "ingestion",
+                f"Low sample count ({n_raw}), recommended >= {self._min_samples * 2}",
+                rows_affected=n_raw,
+            )
 
         has_timestamps = isinstance(self._df.index, pd.DatetimeIndex)
 
         # ── Check: timestamp presence ─────────────────────────────────
         if not has_timestamps:
-            report.add(IssueSeverity.INFO, "ingestion",
-                       "No DatetimeIndex — gap detection and ordering checks skipped")
+            report.add(
+                IssueSeverity.INFO,
+                "ingestion",
+                "No DatetimeIndex — gap detection and ordering checks skipped",
+            )
         else:
             # ── Check: NaT values ─────────────────────────────────────
             nat_count = int(self._df.index.isna().sum())
             if nat_count > 0:
-                report.add(IssueSeverity.ERROR, "ingestion",
-                           f"Found {nat_count} missing timestamp(s) (NaT) — rows dropped",
-                           rows_affected=nat_count)
+                report.add(
+                    IssueSeverity.ERROR,
+                    "ingestion",
+                    f"Found {nat_count} missing timestamp(s) (NaT) — rows dropped",
+                    rows_affected=nat_count,
+                )
                 self._df = self._df[self._df.index.notna()]
 
             # ── Check: chronological order ────────────────────────────
             if not self._df.index.is_monotonic_increasing:
-                report.add(IssueSeverity.WARNING, "ingestion",
-                           "Data not in chronological order — sorted by timestamp")
+                report.add(
+                    IssueSeverity.WARNING,
+                    "ingestion",
+                    "Data not in chronological order — sorted by timestamp",
+                )
                 self._df = self._df.sort_index()
 
             # ── Check: duplicate timestamps ───────────────────────────
             dup_count = int(self._df.index.duplicated().sum())
             if dup_count > 0:
-                report.add(IssueSeverity.WARNING, "ingestion",
-                           f"Found {dup_count} duplicate timestamp(s) — kept first occurrence",
-                           rows_affected=dup_count)
+                report.add(
+                    IssueSeverity.WARNING,
+                    "ingestion",
+                    f"Found {dup_count} duplicate timestamp(s) — kept first occurrence",
+                    rows_affected=dup_count,
+                )
                 self._df = self._df[~self._df.index.duplicated(keep="first")]
 
         # ── Check: NaN values in data columns ─────────────────────────
         nan_rows = int(self._df.isna().any(axis=1).sum())
         if nan_rows > 0:
-            report.add(IssueSeverity.WARNING, "ingestion",
-                       f"Found {nan_rows} row(s) with NaN values — dropped",
-                       rows_affected=nan_rows)
+            report.add(
+                IssueSeverity.WARNING,
+                "ingestion",
+                f"Found {nan_rows} row(s) with NaN values — dropped",
+                rows_affected=nan_rows,
+            )
             self._df = self._df.dropna()
 
         # ── Check: sensor range outliers ────────────────────────────────
@@ -378,7 +442,8 @@ class TrainingPipeline:
             n_outliers = int(col_outliers.sum())
             if n_outliers > 0:
                 report.add(
-                    IssueSeverity.WARNING, "ingestion",
+                    IssueSeverity.WARNING,
+                    "ingestion",
                     f"{col} has {n_outliers} value(s) outside valid range "
                     f"[{lo}, {hi}] — rows dropped",
                     rows_affected=n_outliers,
@@ -390,7 +455,8 @@ class TrainingPipeline:
             self._df = self._df[~outlier_mask]
             logger.info(
                 "Removed %d outlier row(s) based on %s sensor ranges",
-                total_outliers, self._sensor_profile.name,
+                total_outliers,
+                self._sensor_profile.name,
             )
 
         n_clean = len(self._df)
@@ -403,8 +469,11 @@ class TrainingPipeline:
         # Data fingerprint — SHA256 of cleaned data before feature engineering
         self._data_fingerprint = _compute_data_fingerprint(self._df)
 
-        extra = {"rows_before_cleaning": n_raw, "rows_after_cleaning": n_clean,
-                 "data_fingerprint": self._data_fingerprint}
+        extra = {
+            "rows_before_cleaning": n_raw,
+            "rows_after_cleaning": n_clean,
+            "data_fingerprint": self._data_fingerprint,
+        }
         if has_timestamps and n_clean > 0:
             extra["date_range_start"] = str(self._df.index.min())
             extra["date_range_end"] = str(self._df.index.max())
@@ -464,7 +533,7 @@ class TrainingPipeline:
         t0 = time.monotonic()
         rows_in = len(self._features_enhanced)
 
-        # Detect time gaps and window each contiguous segment independently
+        # Detect time gaps and find longest contiguous segment
         segments, gap_info = find_contiguous_segments(self._df.index)
 
         if gap_info.get("gaps_found", 0) > 0:
@@ -478,54 +547,51 @@ class TrainingPipeline:
                 gap_info.get("largest_gap_seconds", 0),
             )
             self._report.add(
-                IssueSeverity.WARNING, "windowing",
+                IssueSeverity.WARNING,
+                "windowing",
                 f"Detected {gap_info['gaps_found']} time gap(s) across "
                 f"{gap_info['segments']} contiguous segments "
                 f"(largest gap: {gap_info.get('largest_gap_seconds', 0):.0f}s)",
             )
 
-        all_X, all_y = [], []
-        skipped_segments = 0
-        for start, end in segments:
-            seg_len = end - start
-            if seg_len < self._window_size:
-                skipped_segments += 1
-                continue
-            seg_X, seg_y = create_sliding_windows(
-                self._features_enhanced[start:end],
-                self._targets[start:end],
-                self._window_size,
-            )
-            all_X.append(seg_X)
-            all_y.append(seg_y)
+        # Find longest contiguous segment
+        longest_segment = max(segments, key=lambda s: s[1] - s[0])
+        start, end = longest_segment
+        seg_len = end - start
 
-        if not all_X:
+        if seg_len < self._window_size:
             raise ValueError(
-                f"No contiguous segments long enough for window_size={self._window_size} "
-                f"({gap_info['segments']} segments, {skipped_segments} too short)"
+                f"Longest contiguous segment ({seg_len} samples) is shorter than "
+                f"window_size={self._window_size}"
             )
 
-        self._X = np.concatenate(all_X)
-        self._y = np.concatenate(all_y)
+        logger.info(
+            "Using longest contiguous segment: rows %d to %d (%d samples)",
+            start,
+            end,
+            seg_len,
+        )
+
+        # Create sliding windows only from longest segment
+        self._X, self._y = create_sliding_windows(
+            self._features_enhanced[start:end],
+            self._targets[start:end],
+            self._window_size,
+        )
 
         feature_dim = self._X.shape[1] if self._X.ndim > 1 else self._X.shape[0]
         logger.info(
             "Created %d windows (window_size=%d, feature_dim=%d)",
-            len(self._X), self._window_size, feature_dim,
+            len(self._X),
+            self._window_size,
+            feature_dim,
         )
 
         extra = {"window_size": self._window_size, "feature_dim": feature_dim}
         extra.update(gap_info)
-        if skipped_segments:
-            extra["skipped_short_segments"] = skipped_segments
-            logger.warning(
-                "Skipped %d segment(s) shorter than window_size=%d",
-                skipped_segments, self._window_size,
-            )
-            self._report.add(
-                IssueSeverity.WARNING, "windowing",
-                f"Skipped {skipped_segments} segment(s) shorter than window_size={self._window_size}",
-            )
+        extra["longest_segment_start"] = start
+        extra["longest_segment_end"] = end
+        extra["longest_segment_samples"] = seg_len
 
         return StageResult(
             state=PipelineState.WINDOWING,
@@ -548,7 +614,9 @@ class TrainingPipeline:
 
         logger.info(
             "Chronological split: %d train / %d val (test_size=%.2f)",
-            len(self._X_train), len(self._X_val), self._test_size,
+            len(self._X_train),
+            len(self._X_val),
+            self._test_size,
         )
 
         return StageResult(
@@ -620,9 +688,9 @@ class TrainingPipeline:
             num_features=self._sensor_profile.total_features,
         )
 
-        if hasattr(self._model, 'kl_loss'):
-            bnn_cfg = settings.get_model_config('bnn')
-            self._model._kl_weight = bnn_cfg.get('kl_weight', 1.0)
+        if hasattr(self._model, "kl_loss"):
+            bnn_cfg = settings.get_model_config("bnn")
+            self._model._kl_weight = bnn_cfg.get("kl_weight", 1.0)
 
         tcfg = settings.get_training_config()
         self._tb_log_dir = self._resolve_tensorboard_dir()
@@ -644,6 +712,7 @@ class TrainingPipeline:
             log_dir=self._tb_log_dir,
             histogram_freq=histogram_freq,
             seed=self._random_state,
+            on_epoch=self._on_epoch_callback,
         )
 
         self._training_history = history
@@ -722,10 +791,14 @@ class TrainingPipeline:
         t0 = time.monotonic()
 
         base = Path(settings.TRAINED_MODELS_BASE)
-        self._model_dir = self._output_dir if self._output_dir else base / self._model_type
+        self._model_dir = (
+            self._output_dir if self._output_dir else base / self._model_type
+        )
 
         # Build data provenance manifest
         manifest = self._build_data_manifest()
+
+        identity = settings.get_sensor_identity()
 
         save_trained_model(
             model=self._model,
@@ -736,6 +809,8 @@ class TrainingPipeline:
             baselines=self._baselines,
             sensor_type=self._sensor_profile.name,
             iaq_standard=self._iaq_standard.name,
+            sensor_id=identity.get("sensor_id"),
+            firmware_version=identity.get("firmware_version"),
             model_dir=str(self._model_dir),
             metrics=self._metrics,
             training_history=self._training_history,
@@ -743,13 +818,14 @@ class TrainingPipeline:
         )
 
         # Compute schema fingerprint for semver
-        schema_fp = compute_schema_fingerprint(
+        self._schema_fp = compute_schema_fingerprint(
             sensor_type=self._sensor_profile.name,
             iaq_standard=self._iaq_standard.name,
             window_size=self._window_size,
             num_features=self._sensor_profile.total_features,
             model_type=self._model_type,
         )
+        schema_fp = self._schema_fp
 
         # Update central manifest and get version
         import pandas as pd
@@ -761,23 +837,45 @@ class TrainingPipeline:
             "metrics": {k: float(v) for k, v in self._metrics.items()},
             "git_commit": manifest["git_commit"],
         }
+        if identity.get("sensor_id"):
+            run_entry["sensor_id"] = identity["sensor_id"]
+        if identity.get("firmware_version"):
+            run_entry["firmware_version"] = identity["firmware_version"]
         self._version = update_central_manifest(
-            self._model_type, run_entry, schema_fingerprint=schema_fp,
+            self._model_type,
+            run_entry,
+            schema_fingerprint=schema_fp,
         )
         manifest["version"] = self._version
 
+        # Build Merkle provenance tree
+        self._merkle_root = self._build_merkle_tree(schema_fp, self._version)
+        manifest["merkle_tree"] = self._merkle_root.to_dict()
+        manifest["merkle_root_hash"] = self._merkle_root.content_hash
+
+        # Patch central MANIFEST.json with merkle_root_hash
+        self._patch_central_manifest_merkle(self._merkle_root.content_hash)
+
         # Patch config.json with version + schema fingerprint (Option B)
         patch_config_with_version(self._model_dir, self._version, schema_fp)
+        patch_config_with_merkle_hash(self._model_dir, self._merkle_root.content_hash)
 
         # Re-save manifest with version included
         from training.utils import save_data_manifest
+
         save_data_manifest(manifest, self._model_dir)
 
-        logger.info("Registered as %s in central manifest", self._version)
+        logger.info(
+            "Registered as %s in central manifest (merkle=%s)",
+            self._version,
+            self._merkle_root.content_hash[:16],
+        )
 
-        artifacts = []
+        self._artifact_paths: List[Path] = []
         if self._model_dir.exists():
-            artifacts = [f.name for f in self._model_dir.iterdir() if f.is_file()]
+            self._artifact_paths = sorted(
+                f for f in self._model_dir.iterdir() if f.is_file()
+            )
 
         return StageResult(
             state=PipelineState.SAVING,
@@ -785,38 +883,114 @@ class TrainingPipeline:
             extra={
                 "model_dir": str(self._model_dir),
                 "version": self._version,
-                "artifacts": artifacts,
+                "artifacts": [f.name for f in self._artifact_paths],
             },
         )
 
-    def _build_data_manifest(self) -> dict:
-        """Assemble the full data provenance manifest from pipeline state."""
-        import pandas as pd
+    def _patch_central_manifest_merkle(self, merkle_root_hash: str) -> None:
+        """Patch the active run in MANIFEST.json with merkle_root_hash."""
+        import json
 
-        # Serialize stage results
-        stages = []
-        for sr in self._stage_results:
-            stages.append({
-                "stage": sr.state.value,
-                "duration_seconds": round(sr.duration_seconds, 3),
-                "rows_in": sr.rows_in,
-                "rows_out": sr.rows_out,
-                "columns": sr.columns,
-                "extra": sr.extra,
-            })
+        manifest_path = Path(settings.TRAINED_MODELS_BASE) / "MANIFEST.json"
+        if not manifest_path.exists():
+            return
+        with open(manifest_path) as f:
+            central = json.load(f)
+        for run in central.get("runs", []):
+            if (
+                run.get("model_type") == self._model_type
+                and run.get("is_active")
+                and run.get("version") == self._version
+            ):
+                run["merkle_root_hash"] = merkle_root_hash
+        with open(manifest_path, "w") as f:
+            json.dump(central, f, indent=2, default=str)
 
-        # Serialize preprocessing issues
-        issues = []
-        for issue in self._report.issues:
-            issues.append({
-                "severity": issue.severity.value,
-                "stage": issue.stage,
-                "message": issue.message,
-                "rows_affected": issue.rows_affected,
-            })
+    def _build_merkle_tree(self, schema_fingerprint: str, version: str):
+        """Build the 6-level Merkle tree from pipeline state."""
+        identity = settings.get_sensor_identity()
 
-        # Config snapshot
-        config_snapshot = {
+        # Level 1: Sensor (leaf)
+        sensor_node = build_sensor_node(
+            sensor_id=identity.get("sensor_id"),
+            firmware_version=identity.get("firmware_version"),
+            sensor_type=self._sensor_profile.name,
+        )
+
+        # Level 2: RawData
+        raw_data_node = build_raw_data_node(
+            sensor_node=sensor_node,
+            source_metadata=self._source.metadata,
+            raw_row_count=self._raw_row_count or 0,
+        )
+
+        # Level 3: CleansedData
+        rows_dropped = (self._raw_row_count or 0) - len(self._df)
+        issues_summary = (
+            "; ".join(f"[{i.severity.value}] {i.message}" for i in self._report.issues)
+            if self._report.issues
+            else "none"
+        )
+
+        cleansed_data_node = build_cleansed_data_node(
+            raw_data_node=raw_data_node,
+            data_fingerprint=self._data_fingerprint or "",
+            clean_row_count=len(self._df),
+            rows_dropped=rows_dropped,
+            issues_summary=issues_summary,
+        )
+
+        # Level 4: PreprocessedData
+        scaler_hash = compute_scaler_hash(self._feature_scaler, self._target_scaler)
+
+        preprocessed_data_node = build_preprocessed_data_node(
+            cleansed_data_node=cleansed_data_node,
+            schema_fingerprint=schema_fingerprint,
+            feature_stats=self._feature_stats or {},
+            baselines=self._baselines,
+            scaler_hash=scaler_hash,
+            window_size=self._window_size,
+            num_features=self._sensor_profile.total_features,
+            sample_count=len(self._X),
+        )
+
+        # Level 5: SplitData
+        split_data_node = build_split_data_node(
+            preprocessed_data_node=preprocessed_data_node,
+            test_size=self._test_size,
+            train_samples=len(self._X_train),
+            val_samples=len(self._X_val),
+        )
+
+        # Level 6: TrainedModel (root)
+        weights_hash = compute_weights_hash(self._model.state_dict())
+        training_config = {
+            "epochs": self._epochs,
+            "learning_rate": self._learning_rate,
+            "batch_size": self._batch_size,
+        }
+
+        root = build_trained_model_node(
+            split_data_node=split_data_node,
+            weights_hash=weights_hash,
+            metrics=self._metrics,
+            training_config=training_config,
+            model_type=self._model_type,
+            version=version,
+        )
+
+        root.compute_hash()
+        return root
+
+    def collect_run_params(self) -> Dict[str, Any]:
+        """Flat dict of all run parameters — ready for mlflow.log_params().
+
+        Can be called at any point after __init__. Values that depend on
+        pipeline execution (data_fingerprint, git_commit, num_features) are
+        included only if already computed; missing keys are omitted.
+        """
+        identity = settings.get_sensor_identity()
+        params: Dict[str, Any] = {
             "model_type": self._model_type,
             "epochs": self._epochs,
             "window_size": self._window_size,
@@ -829,19 +1003,67 @@ class TrainingPipeline:
             "lr_scheduler_factor": self._lr_scheduler_factor,
             "sensor_type": self._sensor_profile.name,
             "iaq_standard": self._iaq_standard.name,
+            "num_features": self._sensor_profile.total_features,
+            "data_source": self._source.name,
         }
+        if identity.get("sensor_id"):
+            params["sensor_id"] = identity["sensor_id"]
+        if identity.get("firmware_version"):
+            params["firmware_version"] = identity["firmware_version"]
+        if self._data_fingerprint:
+            params["data_fingerprint"] = self._data_fingerprint
+        if self._schema_fp:
+            params["schema_fingerprint"] = self._schema_fp
+        git_commit = _get_git_commit()
+        if git_commit != "unknown":
+            params["git_commit"] = git_commit
+        return params
+
+    def _build_data_manifest(self) -> dict:
+        """Assemble the full data provenance manifest from pipeline state."""
+        import pandas as pd
+
+        # Serialize stage results
+        stages = []
+        for sr in self._stage_results:
+            stages.append(
+                {
+                    "stage": sr.state.value,
+                    "duration_seconds": round(sr.duration_seconds, 3),
+                    "rows_in": sr.rows_in,
+                    "rows_out": sr.rows_out,
+                    "columns": sr.columns,
+                    "extra": sr.extra,
+                }
+            )
+
+        # Serialize preprocessing issues
+        issues = []
+        for issue in self._report.issues:
+            issues.append(
+                {
+                    "severity": issue.severity.value,
+                    "stage": issue.stage,
+                    "message": issue.message,
+                    "rows_affected": issue.rows_affected,
+                }
+            )
+
+        run_params = self.collect_run_params()
 
         return {
             "created_at": pd.Timestamp.now().isoformat(),
-            "git_commit": _get_git_commit(),
+            "git_commit": run_params.get("git_commit", _get_git_commit()),
             "data_fingerprint": self._data_fingerprint,
             "data_source": self._source.metadata,
-            "config": config_snapshot,
+            "config": run_params,
             "feature_statistics": self._feature_stats,
             "target_statistics": self._target_stats,
             "stages": stages,
             "preprocessing_issues": issues,
-            "metrics": {k: float(v) for k, v in self._metrics.items()} if self._metrics else {},
+            "metrics": {k: float(v) for k, v in self._metrics.items()}
+            if self._metrics
+            else {},
         }
 
     # ── Orchestrator ───────────────────────────────────────────────────
@@ -888,4 +1110,8 @@ class TrainingPipeline:
             stage_results=list(self._stage_results),
             preprocessing_report=self._report,
             version=self._version,
+            merkle_root_hash=self._merkle_root.content_hash
+            if self._merkle_root
+            else "",
+            artifact_paths=list(self._artifact_paths),
         )
