@@ -299,6 +299,7 @@ class LabelStudioDataSource(DataSource):
         self._url = (url or ls_cfg["url"]).rstrip("/")
         self._api_key = api_key or ls_cfg["api_key"]
         self._project_id = project_id or ls_cfg.get("project_id")
+        self._fetch_stats: Optional[dict] = None
 
     @property
     def name(self) -> str:
@@ -363,20 +364,187 @@ class LabelStudioDataSource(DataSource):
     def fetch(self) -> pd.DataFrame:
         """Export labeled tasks and assemble a training DataFrame.
 
-        Not yet implemented (Stage 2).
+        Annotation resolution logic:
+        - Tasks with a ``Choices`` result containing ``"reject"`` (case-insensitive)
+          are excluded entirely.
+        - Tasks with a ``Number`` result named ``iaq_corrected`` have their target
+          value overridden by the annotator-supplied number.
+        - Unannotated tasks (or tasks whose annotations are all cancelled/skipped)
+          use the original target value from the task ``data`` payload.
+
+        The active ``SensorProfile`` and ``IAQStandard`` determine which columns
+        are required.  ``sensor.field_mapping`` from ``model_config.yaml`` is
+        applied to translate external field names to internal ones.
+
+        Returns a DataFrame whose columns include all of ``SensorProfile.raw_features``
+        plus ``IAQStandard.target_column``.  The index is a ``DatetimeIndex`` when a
+        timestamp column is detectable, otherwise a plain RangeIndex (the pipeline
+        handles both).
         """
-        raise NotImplementedError(
-            "LabelStudioDataSource.fetch() is not yet implemented (Stage 2). "
-            "Stage 1 covers connectivity validation only."
+        import requests
+
+        from app.config import settings
+        from app.profiles import get_iaq_standard, get_sensor_profile
+
+        profile = get_sensor_profile()
+        standard = get_iaq_standard()
+        cfg = settings.load_model_config()
+        field_mapping = cfg.get("sensor", {}).get("field_mapping", {})
+
+        headers = {"Authorization": f"Token {self._api_key}"}
+
+        logger.info(
+            "Exporting tasks from Label Studio project %d (%s)…",
+            self._project_id,
+            self._url,
         )
+        resp = requests.get(
+            f"{self._url}/api/projects/{self._project_id}/export",
+            headers=headers,
+            params={"exportType": "JSON"},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        tasks = resp.json()
+        logger.info("Received %d tasks from Label Studio", len(tasks))
+
+        stats = {
+            "total": len(tasks),
+            "accepted": 0,
+            "rejected": 0,
+            "iaq_corrected": 0,
+            "unannotated": 0,
+        }
+        rows = []
+
+        for task in tasks:
+            task_data = dict(task.get("data", {}))
+            annotations = task.get("annotations", [])
+
+            # ── Resolve annotations ────────────────────────────────────────
+            rejected = False
+            iaq_override = None
+
+            for annotation in annotations:
+                if annotation.get("was_cancelled") or annotation.get("skipped"):
+                    continue
+                for result in annotation.get("result", []):
+                    r_type = result.get("type", "")
+                    from_name = result.get("from_name", "")
+                    value = result.get("value", {})
+
+                    if r_type == "choices":
+                        choices = [c.lower() for c in value.get("choices", [])]
+                        if "reject" in choices:
+                            rejected = True
+                            break
+                    elif r_type == "number" and from_name == "iaq_corrected":
+                        iaq_override = value.get("number")
+                if rejected:
+                    break
+
+            if rejected:
+                stats["rejected"] += 1
+                continue
+
+            # ── Apply field mapping (external → internal) ──────────────────
+            if field_mapping:
+                task_data = {field_mapping.get(k, k): v for k, v in task_data.items()}
+
+            # ── Apply IAQ target override or track unannotated ─────────────
+            active_annotations = [
+                a for a in annotations
+                if not a.get("was_cancelled") and not a.get("skipped")
+            ]
+            if iaq_override is not None:
+                task_data[standard.target_column] = float(iaq_override)
+                stats["iaq_corrected"] += 1
+            elif not active_annotations:
+                stats["unannotated"] += 1
+
+            # ── Prefer task-level created_at as timestamp fallback ─────────
+            if "created_at" in task and "_created_at" not in task_data:
+                task_data["_created_at"] = task["created_at"]
+
+            stats["accepted"] += 1
+            rows.append(task_data)
+
+        logger.info(
+            "LabelStudio annotation resolution: %d total → %d accepted "
+            "(%d iaq_corrected, %d unannotated, %d rejected)",
+            stats["total"],
+            stats["accepted"],
+            stats["iaq_corrected"],
+            stats["unannotated"],
+            stats["rejected"],
+        )
+
+        if not rows:
+            raise ValueError(
+                f"No usable tasks in Label Studio project {self._project_id} "
+                f"(total={stats['total']}, rejected={stats['rejected']}). "
+                f"Ensure tasks have data payloads and are not all rejected."
+            )
+
+        df = pd.DataFrame(rows)
+
+        # ── Detect and set timestamp index ─────────────────────────────────
+        ts_candidates = {"timestamp", "time", "datetime", "date", "ts", "_created_at"}
+        for col in list(df.columns):
+            if col.lower().strip() in ts_candidates:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+                df = df.set_index(col)
+                logger.info("Set timestamp index from column: %s", col)
+                break
+
+        # ── Validate required columns ──────────────────────────────────────
+        required = list(profile.raw_features) + [standard.target_column]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"Label Studio tasks are missing required fields: {missing}. "
+                f"Available: {list(df.columns)}. "
+                f"Check that task data payloads include these fields, "
+                f"or add a sensor.field_mapping in model_config.yaml."
+            )
+
+        # ── Quality filtering ──────────────────────────────────────────────
+        if (
+            profile.quality_column
+            and profile.quality_column in df.columns
+            and profile.quality_min is not None
+        ):
+            before = len(df)
+            df = df[df[profile.quality_column] >= profile.quality_min]
+            logger.info(
+                "Quality filter (%s >= %s): %d → %d rows",
+                profile.quality_column,
+                profile.quality_min,
+                before,
+                len(df),
+            )
+
+        df = df.dropna(subset=required)
+
+        self._fetch_stats = stats
+
+        logger.info(
+            "LabelStudio fetch complete: %d training rows (columns: %s)",
+            len(df),
+            list(df.columns),
+        )
+        return df
 
     @property
     def metadata(self) -> dict:
-        return {
+        meta = {
             "source_type": "label_studio",
             "url": self._url,
             "project_id": self._project_id,
         }
+        if self._fetch_stats is not None:
+            meta["annotation_stats"] = self._fetch_stats
+        return meta
 
 
 class SyntheticSource(DataSource):
