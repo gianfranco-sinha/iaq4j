@@ -87,6 +87,123 @@ run comparison, reproduction, and rollback.
 
 ---
 
+## MLflow Integration
+
+### Experiment tracking and model registry — P1
+
+**Current state:** Training runs produce disconnected artifacts (model weights,
+scalers, config, manifest, training history) stitched together by custom code.
+The Training Run Entity (P2 above) was designed to unify these into a single
+addressable container. MLflow does all of this out of the box — and adds
+experiment comparison, model registry, artifact versioning, and a web UI.
+
+**Relationship to Training Run Entity:** MLflow would **subsume the Training
+Run Entity entirely**. Every field in the proposed `TrainingRun` dataclass
+(config snapshot, data fingerprint, metrics, artifacts, stage timings) maps
+directly to MLflow's native concepts (params, metrics, artifacts, tags). Rather
+than building a custom run container, we adopt the industry standard.
+
+**What MLflow replaces:**
+
+| Current custom component | MLflow equivalent |
+|--------------------------|-------------------|
+| `MANIFEST.json` central registry | MLflow experiment + run list |
+| `training_history.json` per-epoch losses | `mlflow.log_metric()` per step |
+| `config.json` metadata (version, fingerprint) | Run params + tags |
+| Versioned artifact directories (proposed) | MLflow artifact store |
+| `python -m iaq4j runs` (proposed) | MLflow UI + `mlflow.search_runs()` |
+| Run comparison (proposed) | MLflow UI compare view |
+
+**What stays custom (MLflow doesn't replace these):**
+
+| Component | Why it stays |
+|-----------|-------------|
+| Merkle tree data provenance (`training/merkle.py`) | MLflow tracks artifacts but not content-addressable data lineage |
+| Sensor profiles / IAQ standards (`app/profiles.py`) | Domain-specific ABCs — no MLflow equivalent |
+| Schema fingerprint + semver (`training/utils.py`) | Compatibility detection is domain logic; logged as MLflow tags |
+| `TrainingPipeline` FSM (`training/pipeline.py`) | Orchestration logic — MLflow tracks results, not execution |
+| Feature engineering code | Per-profile methods — code, not config |
+
+**Integration surface — what gets logged:**
+
+```python
+# In training/pipeline.py or training/train.py
+
+with mlflow.start_run(run_name=f"{model_type}-{version}"):
+    # Params (static per run)
+    mlflow.log_params({
+        "model_type": model_type,
+        "sensor_type": sensor_profile.name,
+        "iaq_standard": iaq_standard.name,
+        "window_size": config["window_size"],
+        "num_features": num_features,
+        "learning_rate": config["learning_rate"],
+        "epochs": config["epochs"],
+        "schema_fingerprint": schema_fingerprint,
+        "data_fingerprint": data_fingerprint,
+        "git_commit": git_commit,
+    })
+
+    # Metrics (per epoch)
+    for epoch in range(epochs):
+        train_loss, val_loss = train_one_epoch(...)
+        mlflow.log_metrics({"train_loss": train_loss, "val_loss": val_loss}, step=epoch)
+
+    # Final evaluation metrics
+    mlflow.log_metrics({"mae": mae, "rmse": rmse, "r2": r2})
+
+    # Artifacts
+    mlflow.pytorch.log_model(model, "model")
+    mlflow.log_artifact("feature_scaler.pkl")
+    mlflow.log_artifact("target_scaler.pkl")
+    mlflow.log_artifact("data_manifest.json")
+
+    # Tags
+    mlflow.set_tags({
+        "version": version,
+        "schema_fingerprint": schema_fingerprint,
+        "merkle_root": merkle_root,
+    })
+```
+
+**Open design questions (to decide before implementation):**
+
+1. **Deployment mode:** Local file-based (`mlruns/` directory) vs MLflow Tracking
+   Server (SQLite/Postgres backend, S3/local artifact store). Local is simplest
+   to start; server enables remote access and the web UI.
+
+2. **Layer vs replace:** Should MLflow run alongside `MANIFEST.json` (additive
+   layer, low risk) or replace it entirely (cleaner, but migration needed)?
+   Recommendation: layer first, then deprecate MANIFEST once stable.
+
+3. **Model registry:** Use MLflow Model Registry for promotion
+   (Staging → Production) or keep the current `trained_models/` directory
+   as the serving source? Registry adds governance but also complexity.
+
+4. **Artifact store:** Local filesystem vs S3-compatible (MinIO on the Pi)?
+   Local is fine for single-node; MinIO enables backup and remote access.
+
+5. **IAQPredictor loading:** Should `IAQPredictor.load_model()` load from
+   MLflow artifact store or keep loading from `trained_models/`? Could
+   support both with a config flag.
+
+**Requirements:**
+
+- [ ] Add `mlflow` to dependencies
+- [ ] Wrap `train_single_model()` with `mlflow.start_run()` context manager
+- [ ] Log params: model config, sensor type, IAQ standard, schema fingerprint, data fingerprint, git commit
+- [ ] Log metrics per epoch: train_loss, val_loss
+- [ ] Log final metrics: MAE, RMSE, R² (or whatever evaluation produces)
+- [ ] Log artifacts: model.pt, scalers, data_manifest.json
+- [ ] Log tags: version (semver), schema_fingerprint, merkle_root
+- [ ] Decide deployment mode (local file vs tracking server)
+- [ ] Decide layer vs replace strategy for MANIFEST.json
+- [ ] Update `python -m iaq4j runs` to query MLflow instead of (or in addition to) MANIFEST
+- [ ] Evaluate MLflow Model Registry for model promotion workflow
+- [ ] Update standalone training scripts (`train_models.py`, `train_all_models.py`) to log to MLflow
+
+---
+
 ## Sensor Onboarding
 
 ### LLM-driven semantic field mapping from firmware API to sensor profile — P1
@@ -211,18 +328,18 @@ ambiguous fields. The LLM backend itself is pluggable (local or cloud).
 
 **Requirements:**
 
-- [ ] CLI command: `python -m iaq4j map-fields --api-spec <file_or_url_or_repo> [--backend fuzzy|ollama|anthropic]`
+- [x] CLI command: `python -m iaq4j map-fields --source <file_or_url> [--backend fuzzy|ollama]`
 - [ ] GitHub repo input: crawl repo via `gh` CLI for `.h`/`.c` structs, JSON schemas, example payloads, and README field docs
-- [ ] REST endpoint for sensor registration (see Sensor Registration API below)
-- [ ] Tier 1: exact name match (case-insensitive, strip underscores/hyphens)
-- [ ] Tier 2: fuzzy match via `rapidfuzz` + validate against `valid_ranges` and `field_descriptions` units
-- [ ] Tier 3 (Ollama): prompt template sends `field_descriptions` + firmware fields, expects JSON mapping back
+- [x] REST endpoint for sensor registration (see Sensor Registration API below)
+- [x] Tier 1: exact name match (case-insensitive, strip underscores/hyphens)
+- [x] Tier 2: fuzzy match via `rapidfuzz` + validate against `valid_ranges` and `field_descriptions` units
+- [x] Tier 3 (Ollama): prompt template sends `field_descriptions` + firmware fields, expects JSON mapping back
 - [ ] Tier 3 (Cloud): same prompt, via Anthropic Messages API with Haiku
-- [ ] Interactive confirmation: show mapping table with confidence, let user override
-- [ ] Confirmed mapping persisted in `model_config.yaml` under `sensor.field_mapping`
-- [ ] `SensorReading._build_readings()` applies `field_mapping` at validation time
-- [ ] Training data sources apply the same mapping at column-rename time
-- [ ] Fallback: if no mapping configured, current behavior (exact names) is unchanged
+- [x] Interactive confirmation: show mapping table with confidence, let user override
+- [x] Confirmed mapping persisted in `model_config.yaml` under `sensor.field_mapping`
+- [x] `SensorReading._build_readings()` applies `field_mapping` at validation time
+- [x] Training data sources apply the same mapping at column-rename time
+- [x] Fallback: if no mapping configured, current behavior (exact names) is unchanged
 - [ ] `rapidfuzz` added as optional dependency (`pip install iaq4j[mapping]`)
 - [ ] Ollama and Anthropic SDK are optional — graceful error if not available and selected
 
@@ -491,12 +608,12 @@ DELETE /sensors/{sensor_name}
 
 **Requirements:**
 
-- [ ] `FieldMapper` service class extracted from CLI logic (shared by CLI + API)
-- [ ] `POST /sensors/register` endpoint — accepts source, runs tiered mapping, returns proposal
-- [ ] `POST /sensors/register/{mapping_id}/confirm` — persists confirmed mapping to config
-- [ ] `GET /sensors` — list registered sensors and their field mappings
-- [ ] `DELETE /sensors/{sensor_name}` — remove a sensor registration
-- [ ] Proposed mappings stored in memory (or temp file) until confirmed
+- [x] `FieldMapper` service class extracted from CLI logic (shared by CLI + API)
+- [x] `POST /sensors/register` endpoint — accepts source, runs tiered mapping, returns proposal
+- [x] `POST /sensors/register/{mapping_id}/confirm` — persists confirmed mapping to config
+- [x] `GET /sensors` — list active field mapping
+- [x] `DELETE /sensors/mapping` — remove field mapping
+- [x] Proposed mappings stored in memory until confirmed
 - [ ] Background task support for slow operations (repo crawl, LLM inference)
 
 ---
@@ -523,6 +640,198 @@ DELETE /sensors/{sensor_name}
 
 ---
 
+## Telemetry Integrity
+
+### Per-sensor sequence numbers for ordering and replay detection — P2
+
+**Background:** Comparison against the IAQSignedTelemetry domain model
+identified sequence numbers as a meaningful gap. The domain model requires
+a monotonically increasing `sequence_number` per `sensor_id` as a first-class
+invariant. iaq4j currently has no ordering or replay protection at the
+ingestion boundary.
+
+**What sequence numbers give us:**
+
+| Problem | Without sequence number | With sequence number |
+|---------|------------------------|---------------------|
+| Dropped readings | Silent — gap in InfluxDB time series is indistinguishable from normal | Detectable — gap in sequence means missed readings |
+| Reordered delivery | Silent — out-of-order write lands in InfluxDB at wrong timestamp | Detectable — sequence regresses |
+| Replay attack | Identical duplicate is accepted and written | Rejected — sequence already seen for this sensor |
+| Sensor restart | No signal | Sequence resets to 0, can be flagged as an event |
+
+**Scope:** This is relevant today only if sensors are networked (MQTT, HTTP
+push over the internet). For a local BME680 read over I²C on the same Pi, it
+adds no value. Implement when remote or multi-sensor deployments are in scope.
+
+**Proposed design:**
+
+- Add optional `sequence_number: int` field to `SensorReading`
+- `InferenceEngine` (or a new ingestion layer) tracks last-seen sequence per
+  `sensor_id` in memory (and optionally persists to InfluxDB)
+- On receipt: if `sequence_number <= last_seen`, log a warning and optionally
+  reject (configurable — warn-only vs strict mode)
+- Sequence resets (sensor restart) detected as large backward jump; logged
+  as an event rather than an error
+- No sequence number present → accepted without check (backward compat,
+  local sensor mode)
+
+**Requirements:**
+
+- [ ] Add optional `sequence_number: int` to `SensorReading` schema
+- [ ] `InferenceEngine` tracks last-seen sequence per `sensor_id`
+- [ ] Configurable enforcement mode: `off` (default) | `warn` | `strict`
+- [ ] Sequence gaps and regressions logged as structured warnings in `IAQResponse`
+- [ ] Sequence state persisted across restarts (InfluxDB tag or local file)
+- [ ] `GET /sensors/{sensor_id}/sequence` endpoint to inspect current state
+
+---
+
+## LLM Readiness
+
+### Infrastructure prerequisites for agentic orchestration — P1
+
+**Current state:** The codebase has strong machine-readable foundations — the
+training pipeline emits structured `PipelineResult`/`StageResult`, sensor
+profiles are self-describing ABCs, the field mapper returns confidence-scored
+proposals, and model artifacts carry version + fingerprint metadata. However,
+several gaps prevent an LLM agent (or any external orchestrator) from
+reliably driving the system end-to-end.
+
+**Goal:** Close the gap between "ML platform with a CLI" and "ML platform an
+agent can operate." Every component that the agent needs must be accessible
+via REST, return structured data, and fail with actionable error information.
+
+**Codebase assessment — what's already agent-ready:**
+
+| Component | File | Score | Why |
+|-----------|------|-------|-----|
+| TrainingPipeline | `training/pipeline.py` | 9/10 | Structured `PipelineResult`, callbacks, `StageResult` with timing |
+| Sensor Profiles | `app/profiles.py` | 9/10 | Self-describing ABCs, `feature_quantities`, `valid_ranges` |
+| Field Mapper | `app/field_mapper.py` | 9/10 | 3-tier strategy, confidence scores, method provenance |
+| Quantities Registry | `quantities.yaml` | 9/10 | Central, aliases, valid_ranges, unit conversions |
+| MANIFEST.json | `trained_models/` | 9/10 | Version, fingerprints, metrics, git_commit |
+| IAQResponse schema | `app/schemas.py` | 8/10 | Bayesian structure: observation, predicted, prior, uncertainty |
+
+**What needs fixing — 7 gap areas:**
+
+---
+
+#### Phase 1: Machine-Readable Foundation
+
+Close internal gaps so that every component returns structured, actionable
+information. No new REST endpoints yet — these are plumbing fixes.
+
+**A. Config cache stale after writes**
+
+`app/config.py` never invalidates `_model_config_cache` after endpoints write
+to YAML. An agent (or any caller) that writes config then reads it back gets
+stale values.
+
+| Change | File | What |
+|--------|------|------|
+| Add `invalidate_config_cache()` | `app/config.py` | Clear `_model_config_cache` dict |
+| Call after YAML writes | `app/main.py` | Every endpoint that writes to `model_config.yaml` calls invalidate |
+
+**B. No InfluxDB read access**
+
+`app/database.py` only has `write_prediction()`. An agent can't query
+prediction history, compare predicted vs actual IAQ, or analyze trends.
+
+| Change | File | What |
+|--------|------|------|
+| `query_predictions()` | `app/database.py` | Read back predictions by time range, model type |
+| `query_raw_readings()` | `app/database.py` | Read raw sensor readings |
+| `query_prediction_vs_actual()` | `app/database.py` | Join predicted and actual IAQ for evaluation |
+
+**C. Training exceptions swallowed**
+
+`training/train.py:train_single_model()` catches all exceptions and returns
+`None`. An agent can't distinguish "failed because data was empty" from
+"failed because GPU OOM" from "succeeded."
+
+| Change | File | What |
+|--------|------|------|
+| Re-raise as `PipelineError` | `training/train.py` | Typed exception with stage, error code, traceback |
+| `FailureInfo` schema | `training/pipeline.py` | Structured failure metadata (stage, cause, suggestion) |
+
+**D. Standardized error model**
+
+API endpoints return ad-hoc error dicts. An agent needs a consistent schema
+to parse failures programmatically.
+
+| Change | File | What |
+|--------|------|------|
+| `APIError` Pydantic model | `app/schemas.py` | `error_code`, `detail`, `timestamp`, optional `context` dict |
+| Exception handlers | `app/main.py` | Map known exceptions to `APIError` responses |
+
+**Requirements (Phase 1):**
+
+- [ ] `app/config.py`: add `invalidate_config_cache()` method; call from all YAML-writing endpoints
+- [ ] `app/database.py`: add `query_predictions(time_range, model_type)` returning list of dicts
+- [ ] `app/database.py`: add `query_raw_readings(time_range)` returning list of dicts
+- [ ] `app/database.py`: add `query_prediction_vs_actual(time_range, model_type)` for evaluation
+- [ ] `training/train.py`: stop catching all exceptions; re-raise as typed `PipelineError`
+- [ ] `training/pipeline.py`: add `FailureInfo` dataclass with stage, error_code, suggestion
+- [ ] `app/schemas.py`: add `APIError` Pydantic model with `error_code`, `detail`, `timestamp`
+- [ ] `app/main.py`: add exception handlers that return structured `APIError` responses
+
+---
+
+#### Phase 2: Agent Tool Surface
+
+Expose every component the agent needs as a REST endpoint. Each endpoint
+returns structured JSON that maps 1:1 to an agent tool.
+
+**New endpoints:**
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /profiles/sensors` | List registered sensor profiles with features, quantities, ranges |
+| `GET /profiles/standards` | List IAQ standards with categories and scale ranges |
+| `GET /quantities` | Physical quantity registry (names, units, aliases, ranges) |
+| `GET /models/{type}/info` | Full artifact metadata: version, fingerprint, metrics, data lineage |
+| `GET /models/manifest` | Central MANIFEST.json with all training runs |
+| `GET /history/predictions` | Query historical predictions from InfluxDB (time range, model type) |
+| `GET /history/readings` | Query historical raw sensor readings |
+| `GET /history/accuracy` | Predicted vs actual IAQ comparison |
+| `GET /config` | Active model + database config (secrets redacted) |
+| `POST /training/start` | Trigger training as background task, return `job_id` |
+| `GET /training/{job_id}` | Poll training job status and results |
+| `GET /audit` | Queryable mutation audit trail (model switches, config writes) |
+
+**Consistency fix:**
+
+| Endpoint | Change |
+|----------|--------|
+| `GET /predict/compare` | Return structured `IAQResponse` per model instead of flat dicts |
+
+**Requirements (Phase 2):**
+
+- [ ] `GET /profiles/sensors` — serialize sensor profile ABCs (features, quantities, ranges, field descriptions)
+- [ ] `GET /profiles/standards` — serialize IAQ standards (categories, scale range, breakpoints)
+- [ ] `GET /quantities` — serve `quantities.yaml` as structured JSON
+- [ ] `GET /models/{type}/info` — load `config.json` + `MANIFEST.json` entry for model type
+- [ ] `GET /models/manifest` — serve full `MANIFEST.json`
+- [ ] `GET /history/predictions` — query InfluxDB via new `query_predictions()` (Phase 1)
+- [ ] `GET /history/readings` — query InfluxDB via new `query_raw_readings()` (Phase 1)
+- [ ] `GET /history/accuracy` — query InfluxDB via new `query_prediction_vs_actual()` (Phase 1)
+- [ ] `GET /config` — serialize active settings with secrets redacted
+- [ ] `POST /training/start` — launch `train_single_model()` in background task, return job ID
+- [ ] `GET /training/{job_id}` — return job status (pending/running/completed/failed) and results
+- [ ] `GET /audit` — queryable log of mutations with timestamps
+- [ ] Fix `/predict/compare` to return `Dict[str, IAQResponse]` instead of flat dicts
+- [ ] OpenAPI schema includes all new endpoints with typed request/response models
+
+---
+
+#### Phase 3: Agent Loop
+
+Phase 3 is the existing **LLM Agent** roadmap item below. It depends on
+Phase 1 (structured internals) and Phase 2 (REST tool surface) being
+complete. The agent's tool registry maps 1:1 to Phase 2 endpoints.
+
+---
+
 ## LLM Agent
 
 ### Agentic orchestrator for data ingestion, training, and insight — P2
@@ -532,7 +841,15 @@ Users express intent in natural language; the agent coordinates data ingestion,
 field mapping, training, evaluation, and reporting by calling existing
 components as tools.
 
-**Depends on:** Physical quantity registry, Semantic field mapping
+**Depends on:** LLM Readiness Phase 1 + Phase 2 (above), Semantic field mapping
+
+**Prerequisites from LLM Readiness (must be complete before starting):**
+
+- Phase 1: config cache invalidation, InfluxDB read access, training exception
+  propagation, standardized `APIError` model
+- Phase 2: all `GET /profiles/*`, `GET /quantities`, `GET /models/*`,
+  `GET /history/*`, `GET /config`, `POST /training/start`,
+  `GET /training/{job_id}`, `GET /audit` endpoints operational
 
 **Core capabilities:**
 
@@ -563,19 +880,23 @@ components as tools.
 - Agent has read access to InfluxDB history, model manifests, training
   reports, and live predictions
 
-**Tool registry — each tool maps to an existing component:**
+**Tool registry — each tool maps 1:1 to a Phase 2 REST endpoint:**
 
-```
-inspect_data     → Read file/URL, sample rows, infer schema and units
-map_fields       → Semantic field mapper (exact → fuzzy → LLM)
-validate_data    → PreprocessingReport, outlier detection, gap analysis
-train_model      → TrainingPipeline.orchestrate()
-evaluate_model   → Metrics comparison, category distribution, version diff
-query_history    → InfluxDB reads (predictions, actuals, sensor readings)
-explain          → Interpret readings + prediction in natural language
-manage_models    → List versions, switch active, compare MANIFEST entries
-manage_sensors   → List registered sensors, field mappings, quantities
-```
+| Tool | REST Endpoint | Purpose |
+|------|---------------|---------|
+| `inspect_data` | `POST /data/upload`, `POST /data/import` | Read file/URL, sample rows, infer schema and units |
+| `map_fields` | `POST /sensors/register` | Semantic field mapper (exact → fuzzy → LLM) |
+| `get_profiles` | `GET /profiles/sensors`, `GET /profiles/standards` | List sensor profiles and IAQ standards |
+| `get_quantities` | `GET /quantities` | Physical quantity registry |
+| `train_model` | `POST /training/start` | Launch training as background task |
+| `poll_training` | `GET /training/{job_id}` | Check training job status and results |
+| `get_model_info` | `GET /models/{type}/info`, `GET /models/manifest` | Artifact metadata, versions, metrics |
+| `query_history` | `GET /history/predictions`, `GET /history/readings` | InfluxDB reads |
+| `evaluate_accuracy` | `GET /history/accuracy` | Predicted vs actual IAQ comparison |
+| `get_config` | `GET /config` | Active model + database config (redacted) |
+| `get_audit` | `GET /audit` | Queryable mutation trail |
+| `manage_models` | `POST /model/select`, existing endpoints | Switch active, compare versions |
+| `manage_sensors` | `GET /sensors`, `DELETE /sensors/mapping` | List/remove field mappings |
 
 **Proposed endpoints:**
 

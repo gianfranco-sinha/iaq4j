@@ -475,6 +475,22 @@ class IAQPredictor:
                         self.model_type, saved_fp, current_fp,
                     )
 
+            # Merkle root hash cross-check (config.json vs data_manifest.json)
+            config_merkle = self.config.get("merkle_root_hash")
+            if config_merkle:
+                manifest_path = model_dir / "data_manifest.json"
+                if manifest_path.exists():
+                    with open(manifest_path) as mf:
+                        dm = json.load(mf)
+                    manifest_merkle = dm.get("merkle_root_hash", "")
+                    if manifest_merkle and config_merkle != manifest_merkle:
+                        logger.warning(
+                            "Merkle root hash mismatch for %s: "
+                            "config.json=%s, data_manifest.json=%s. "
+                            "Model artifacts may have been modified.",
+                            self.model_type, config_merkle[:16], manifest_merkle[:16],
+                        )
+
             return True
 
         except Exception as e:

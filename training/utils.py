@@ -1,6 +1,7 @@
 from pathlib import Path
 import hashlib
 import json
+import logging
 import os
 import pickle
 import random
@@ -12,6 +13,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+logger = logging.getLogger("training.utils")
 
 
 def seed_everything(seed: int) -> None:
@@ -102,6 +105,7 @@ def train_model(
     lr_scheduler_patience=10, lr_scheduler_factor=0.5,
     log_dir=None, histogram_freq=50,
     seed=None,
+    on_epoch=None,
 ):
     """Train a model with DataLoader, LR scheduler, and validation tracking.
 
@@ -109,6 +113,8 @@ def train_model(
         log_dir: If set, write TensorBoard events (scalars, LR, weight histograms).
         histogram_freq: Log weight histograms every N epochs (0 to disable).
         seed: If set, seed all RNGs and use a deterministic DataLoader shuffle.
+        on_epoch: Optional callback invoked after each epoch with signature
+            (epoch: int, train_loss: float, val_loss: float, lr: float) -> None.
     """
     if seed is not None:
         seed_everything(seed)
@@ -188,6 +194,10 @@ def train_model(
 
         if (epoch + 1) % 20 == 0:
             print(f"  Epoch [{epoch + 1}/{epochs}], Train: {train_loss:.6f}, Val: {val_loss:.6f}")
+
+        # ── Epoch callback ────────────────────────────────────────────
+        if on_epoch is not None:
+            on_epoch(epoch, train_loss, val_loss, optimizer.param_groups[0]["lr"])
 
         # ── TensorBoard logging ───────────────────────────────────────
         if writer is not None:
@@ -422,6 +432,15 @@ def update_central_manifest(
     )
     new_version = f"{model_type}-{semver}"
 
+    # Advisory: warn if sensor_id changed between consecutive runs
+    for run in reversed(central["runs"]):
+        if run.get("model_type") == model_type and run.get("is_active"):
+            prev_sensor = run.get("sensor_id")
+            curr_sensor = run_entry.get("sensor_id")
+            if prev_sensor and curr_sensor and prev_sensor != curr_sensor:
+                logger.warning("Sensor changed: %s → %s", prev_sensor, curr_sensor)
+            break
+
     # Deactivate previous runs of same model type
     for run in central["runs"]:
         if run.get("model_type") == model_type:
@@ -445,6 +464,7 @@ def save_trained_model(
     model, feature_scaler, target_scaler, model_type,
     window_size, model_dir, metrics,
     baselines=None, sensor_type=None, iaq_standard=None,
+    sensor_id=None, firmware_version=None,
     baseline_gas_resistance=None,  # legacy compat
     training_history=None,
     data_manifest=None,
@@ -476,6 +496,10 @@ def save_trained_model(
         "r2": float(metrics["r2"]),
         "notes": f"Trained with {model_type.upper()} ({sensor_type or 'bme680'}/{iaq_standard or 'bsec'})",
     }
+    if sensor_id:
+        config["sensor_id"] = sensor_id
+    if firmware_version:
+        config["firmware_version"] = firmware_version
 
     with open(f"{model_dir}/config.json", "w") as f:
         json.dump(config, f, indent=2)
@@ -524,5 +548,17 @@ def patch_config_with_version(model_dir, version: str, schema_fingerprint: str) 
         config = json.load(f)
     config["version"] = version
     config["schema_fingerprint"] = schema_fingerprint
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def patch_config_with_merkle_hash(model_dir, merkle_root_hash: str) -> None:
+    """Patch config.json in model_dir with merkle_root_hash after save."""
+    config_path = Path(model_dir) / "config.json"
+    if not config_path.exists():
+        return
+    with open(config_path) as f:
+        config = json.load(f)
+    config["merkle_root_hash"] = merkle_root_hash
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)

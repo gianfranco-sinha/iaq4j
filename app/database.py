@@ -210,6 +210,8 @@ class InfluxDBManager:
         model_type,
         readings: dict = None,
         iaq_actual: float = None,
+        sensor_id: str = None,
+        firmware_version: str = None,
         # Legacy kwargs for backward compatibility
         temperature=None,
         rel_humidity=None,
@@ -256,6 +258,10 @@ class InfluxDBManager:
                 from datetime import datetime
 
                 point = Point("iaq_predictions").tag("model", model_type)
+                if sensor_id:
+                    point = point.tag("sensor_id", sensor_id)
+                if firmware_version:
+                    point = point.tag("firmware_version", firmware_version)
                 for k, v in fields.items():
                     point = point.field(k, v)
                 point = point.time(datetime.fromtimestamp(timestamp))
@@ -265,11 +271,16 @@ class InfluxDBManager:
                 result = True
 
             else:
+                tags = {"model": model_type}
+                if sensor_id:
+                    tags["sensor_id"] = sensor_id
+                if firmware_version:
+                    tags["firmware_version"] = firmware_version
                 json_body = [
                     {
                         "measurement": "iaq_predictions",
                         "time": timestamp,
-                        "tags": {"model": model_type},
+                        "tags": tags,
                         "fields": fields,
                     }
                 ]
