@@ -37,7 +37,8 @@ def _resolve_prior_variable(
     if state_config is None:
         logger.warning(
             "Prior variable '%s' has no config for state '%s' — skipped",
-            var_name, state,
+            var_name,
+            state,
         )
         return None
 
@@ -94,8 +95,8 @@ def _apply_bayesian_update(
 
         # Gaussian conjugate update
         mu_prior = mu + shift
-        prec_model = 1.0 / (sigma ** 2)
-        prec_prior = 1.0 / (prior_std ** 2)
+        prec_model = 1.0 / (sigma**2)
+        prec_prior = 1.0 / (prior_std**2)
         prec_post = prec_model + prec_prior
         mu = (mu * prec_model + mu_prior * prec_prior) / prec_post
         sigma = math.sqrt(1.0 / prec_post)
@@ -125,12 +126,154 @@ class InferenceEngine:
         self.predictor = predictor
         self.prediction_history = []
         self.max_history = 1000
+        self.last_sequences: Dict[str, int] = {}
+        self.last_timestamps: Dict[str, float] = {}
+
+    def _validate_sequence(
+        self,
+        sensor_id: Optional[str],
+        sequence_number: Optional[int],
+        timestamp: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Validate sequence number for replay detection and ordering.
+
+        Also validates that timestamp and sequence_number are monotonically aligned
+        (i.e., if t2 > t1 then s2 > s1).
+
+        Args:
+            sensor_id: Unique sensor identifier
+            sequence_number: Monotonically increasing sequence number
+            timestamp: ISO timestamp string
+
+        Returns:
+            Dict with validation result (None if valid), or None if no check needed
+        """
+        if sensor_id is None:
+            if sequence_number is not None:
+                logger.warning(
+                    "sequence_number provided (%d) but no sensor_id — cannot track per-sensor sequence",
+                    sequence_number,
+                )
+            return None
+
+        if sequence_number is None:
+            logger.debug(
+                "No sequence_number provided for sensor_id=%s — skipping sequence validation",
+                sensor_id,
+            )
+            return None
+
+        last_seq = self.last_sequences.get(sensor_id)
+        last_ts = self.last_timestamps.get(sensor_id)
+
+        if last_seq is None:
+            logger.info(
+                "First reading from sensor_id=%s with sequence_number=%d",
+                sensor_id,
+                sequence_number,
+            )
+        elif sequence_number < last_seq:
+            logger.warning(
+                "Sequence regression for sensor_id=%s: got %d, expected >= %d",
+                sensor_id,
+                sequence_number,
+                last_seq,
+            )
+            return {
+                "status": "regression",
+                "message": f"Sequence number {sequence_number} is less than last seen {last_seq}",
+                "last_sequence": last_seq,
+                "received_sequence": sequence_number,
+            }
+        elif sequence_number == last_seq:
+            logger.warning(
+                "Duplicate sequence for sensor_id=%s: sequence_number=%d already seen",
+                sensor_id,
+                sequence_number,
+            )
+            return {
+                "status": "duplicate",
+                "message": f"Sequence number {sequence_number} already processed",
+                "last_sequence": last_seq,
+            }
+
+        if timestamp is not None and last_ts is not None:
+            try:
+                from datetime import datetime
+
+                current_ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                last_ts_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+
+                ts_advanced = current_ts > last_ts_dt
+                seq_advanced = sequence_number > last_seq
+
+                if ts_advanced != seq_advanced:
+                    violation_type = (
+                        "timestamp_advanced_seq_not"
+                        if ts_advanced
+                        else "seq_advanced_timestamp_not"
+                    )
+                    logger.warning(
+                        "Monotonicity violation for sensor_id=%s: timestamp and sequence_number not aligned. "
+                        "timestamp: %s -> %s (%s), sequence: %d -> %d (%s)",
+                        sensor_id,
+                        last_ts,
+                        timestamp,
+                        "advanced" if ts_advanced else "regressed",
+                        last_seq,
+                        sequence_number,
+                        "advanced" if seq_advanced else "regressed",
+                    )
+                    return {
+                        "status": "monotonicity_violation",
+                        "message": f"Timestamp and sequence number monotonicity misaligned: "
+                        f"timestamp {('advanced' if ts_advanced else 'regressed')}, "
+                        f"sequence {('advanced' if seq_advanced else 'regressed')}",
+                        "last_timestamp": last_ts,
+                        "received_timestamp": timestamp,
+                        "last_sequence": last_seq,
+                        "received_sequence": sequence_number,
+                    }
+            except (ValueError, AttributeError) as e:
+                logger.warning(
+                    "Failed to parse timestamp for monotonicity check: %s — %s",
+                    timestamp,
+                    e,
+                )
+
+        return None
+
+        return None
+
+    def get_sequence_state(self, sensor_id: str) -> Dict:
+        """Get the current sequence state for a sensor.
+
+        Args:
+            sensor_id: Unique sensor identifier
+
+        Returns:
+            Dict with last_sequence and timestamp info
+        """
+        last_seq = self.last_sequences.get(sensor_id)
+        last_ts = self.last_timestamps.get(sensor_id)
+        if last_seq is None:
+            return {
+                "sensor_id": sensor_id,
+                "last_sequence": None,
+                "last_timestamp": None,
+                "message": "No readings received from this sensor",
+            }
+        return {
+            "sensor_id": sensor_id,
+            "last_sequence": last_seq,
+            "last_timestamp": last_ts,
+        }
 
     def _compute_prior(self) -> Optional[dict]:
         """Compute a prior belief about IAQ from recent history or training distribution."""
         if len(self.prediction_history) >= 5:
             window = min(20, len(self.prediction_history))
-            recent_iaqs = [h['iaq'] for h in self.prediction_history[-window:]]
+            recent_iaqs = [h["iaq"] for h in self.prediction_history[-window:]]
             return {
                 "mean": float(np.mean(recent_iaqs)),
                 "std": float(np.std(recent_iaqs)),
@@ -140,7 +283,7 @@ class InferenceEngine:
 
         if self.predictor.target_scaler is not None:
             scaler = self.predictor.target_scaler
-            if hasattr(scaler, 'data_min_') and hasattr(scaler, 'data_max_'):
+            if hasattr(scaler, "data_min_") and hasattr(scaler, "data_max_"):
                 lo = float(scaler.data_min_[0])
                 hi = float(scaler.data_max_[0])
                 return {
@@ -152,11 +295,17 @@ class InferenceEngine:
 
         return None
 
-    def predict_single(self, readings: dict = None,
-                       include_uncertainty: bool = True,
-                       n_mc_samples: int = 10,
-                       prior_variables: Dict[str, float] = None,
-                       **kwargs) -> Dict:
+    def predict_single(
+        self,
+        readings: dict = None,
+        include_uncertainty: bool = True,
+        n_mc_samples: int = 10,
+        prior_variables: Dict[str, float] = None,
+        sensor_id: Optional[str] = None,
+        sequence_number: Optional[int] = None,
+        timestamp: Optional[str] = None,
+        **kwargs,
+    ) -> Dict:
         """Single prediction with prior, uncertainty, and structured output.
 
         Args:
@@ -164,9 +313,27 @@ class InferenceEngine:
             include_uncertainty: whether to run MC dropout for uncertainty.
             n_mc_samples: number of MC dropout forward passes.
             prior_variables: external signals for Bayesian conjugate update.
+            sensor_id: Unique sensor identifier for sequence tracking.
+            sequence_number: Monotonically increasing sequence number for replay detection.
+            timestamp: ISO timestamp string for temporal ordering validation.
         """
         if readings is None:
             readings = kwargs
+
+        seq_validation = self._validate_sequence(sensor_id, sequence_number, timestamp)
+
+        if seq_validation is not None:
+            result = {
+                "status": "sequence_error",
+                "sequence_error": seq_validation,
+                "readings": readings,
+            }
+            if sensor_id is not None and sequence_number is not None:
+                if seq_validation["status"] == "regression":
+                    pass
+                else:
+                    return result
+            return result
 
         # Compute prior BEFORE the new prediction
         prior = self._compute_prior()
@@ -179,17 +346,22 @@ class InferenceEngine:
             result["prior"] = prior
 
         # Apply Bayesian conjugate update from prior variables
-        if (prior_variables
-                and result.get('status') == 'ready'
-                and result.get('iaq') is not None):
+        if (
+            prior_variables
+            and result.get("status") == "ready"
+            and result.get("iaq") is not None
+        ):
             predicted = result.get("predicted", {})
             unc = predicted.get("uncertainty")
             if unc and unc.get("std") and unc["std"] > 0:
                 update = _apply_bayesian_update(
-                    predicted["mean"], unc["std"], prior_variables,
+                    predicted["mean"],
+                    unc["std"],
+                    prior_variables,
                 )
                 if update is not None:
                     from app.profiles import get_iaq_standard
+
                     standard = get_iaq_standard()
 
                     new_iaq = standard.clamp(update["post_mean"])
@@ -210,20 +382,28 @@ class InferenceEngine:
                     result["bayesian_update"] = update
 
         # Add to history if prediction was successful
-        if result.get('status') == 'ready' and result.get('iaq') is not None:
+        if result.get("status") == "ready" and result.get("iaq") is not None:
             history_entry = dict(readings)
-            history_entry['iaq'] = result['iaq']
+            history_entry["iaq"] = result["iaq"]
             self.prediction_history.append(history_entry)
 
             if len(self.prediction_history) > self.max_history:
                 self.prediction_history.pop(0)
 
+            # Update sequence tracking
+            if sensor_id is not None and sequence_number is not None:
+                self.last_sequences[sensor_id] = sequence_number
+                if timestamp is not None:
+                    self.last_timestamps[sensor_id] = timestamp
+
             # Supplement with history-based uncertainty for models without dropout
             predicted = result.get("predicted", {})
             unc = predicted.get("uncertainty", {})
-            if (unc.get("method") == "deterministic"
-                    and len(self.prediction_history) >= 10):
-                recent_iaqs = [h['iaq'] for h in self.prediction_history[-20:]]
+            if (
+                unc.get("method") == "deterministic"
+                and len(self.prediction_history) >= 10
+            ):
+                recent_iaqs = [h["iaq"] for h in self.prediction_history[-20:]]
                 result["predicted"]["uncertainty"] = {
                     "std": float(np.std(recent_iaqs)),
                     "ci_lower": float(np.percentile(recent_iaqs, 2.5)),
@@ -234,13 +414,15 @@ class InferenceEngine:
 
             # Add statistics if we have history
             if len(self.prediction_history) >= 10:
-                recent_iaqs = [h['iaq'] for h in self.prediction_history[-10:]]
-                result['statistics'] = {
-                    'recent_avg': np.mean(recent_iaqs),
-                    'recent_std': np.std(recent_iaqs),
-                    'recent_min': np.min(recent_iaqs),
-                    'recent_max': np.max(recent_iaqs),
-                    'trend': 'improving' if recent_iaqs[-1] < recent_iaqs[0] else 'worsening'
+                recent_iaqs = [h["iaq"] for h in self.prediction_history[-10:]]
+                result["statistics"] = {
+                    "recent_avg": np.mean(recent_iaqs),
+                    "recent_std": np.std(recent_iaqs),
+                    "recent_min": np.min(recent_iaqs),
+                    "recent_max": np.max(recent_iaqs),
+                    "trend": "improving"
+                    if recent_iaqs[-1] < recent_iaqs[0]
+                    else "worsening",
                 }
 
         return result
@@ -249,10 +431,13 @@ class InferenceEngine:
         """Batch prediction for multiple readings."""
         return [self.predict_single(reading) for reading in readings]
 
-    def predict_with_uncertainty(self, readings: dict = None,
-                                 n_samples: int = 10,
-                                 prior_variables: Dict[str, float] = None,
-                                 **kwargs) -> Dict:
+    def predict_with_uncertainty(
+        self,
+        readings: dict = None,
+        n_samples: int = 10,
+        prior_variables: Dict[str, float] = None,
+        **kwargs,
+    ) -> Dict:
         """Prediction with uncertainty estimation.
 
         Delegates to predict_single with MC dropout enabled.
@@ -269,29 +454,27 @@ class InferenceEngine:
     def get_statistics(self) -> Dict:
         """Get statistics from prediction history."""
         if not self.prediction_history:
-            return {
-                'count': 0,
-                'message': 'No predictions yet'
-            }
+            return {"count": 0, "message": "No predictions yet"}
 
-        iaqs = [h['iaq'] for h in self.prediction_history]
+        iaqs = [h["iaq"] for h in self.prediction_history]
 
         from app.profiles import get_iaq_standard
+
         standard = get_iaq_standard()
 
         return {
-            'count': len(self.prediction_history),
-            'iaq_mean': float(np.mean(iaqs)),
-            'iaq_std': float(np.std(iaqs)),
-            'iaq_min': float(np.min(iaqs)),
-            'iaq_max': float(np.max(iaqs)),
-            'percentiles': {
-                'p25': float(np.percentile(iaqs, 25)),
-                'p50': float(np.percentile(iaqs, 50)),
-                'p75': float(np.percentile(iaqs, 75)),
-                'p95': float(np.percentile(iaqs, 95))
+            "count": len(self.prediction_history),
+            "iaq_mean": float(np.mean(iaqs)),
+            "iaq_std": float(np.std(iaqs)),
+            "iaq_min": float(np.min(iaqs)),
+            "iaq_max": float(np.max(iaqs)),
+            "percentiles": {
+                "p25": float(np.percentile(iaqs, 25)),
+                "p50": float(np.percentile(iaqs, 50)),
+                "p75": float(np.percentile(iaqs, 75)),
+                "p95": float(np.percentile(iaqs, 95)),
             },
-            'distribution': standard.category_distribution(iaqs),
+            "distribution": standard.category_distribution(iaqs),
         }
 
     def reset_history(self):
@@ -305,6 +488,7 @@ class InferenceEngine:
             return None
 
         from app.profiles import get_sensor_profile
+
         profile = get_sensor_profile()
 
         recent = self.prediction_history[-50:]
@@ -321,9 +505,9 @@ class InferenceEngine:
             feat_std = np.std(values)
             cv = float(feat_std / feat_mean) if feat_mean != 0 else 0.0
             feature_stability[feat] = {
-                'mean': float(feat_mean),
-                'std': float(feat_std),
-                'cv': cv,
+                "mean": float(feat_mean),
+                "std": float(feat_std),
+                "cv": cv,
             }
             if cv > 0.3:
                 warnings.append(f"High {feat} variability (CV={cv:.2f})")
@@ -331,17 +515,17 @@ class InferenceEngine:
                 warnings.append(f"{feat} appears stuck (CV={cv:.4f})")
 
         # Check IAQ trend
-        iaqs = [h['iaq'] for h in recent]
+        iaqs = [h["iaq"] for h in recent]
         iaq_trend = np.polyfit(range(len(iaqs)), iaqs, 1)[0]
 
         if abs(iaq_trend) > 1.0:
             warnings.append("Rapid IAQ trend detected")
 
         return {
-            'feature_stability': feature_stability,
-            'iaq_trend': float(iaq_trend),
-            'warnings': warnings,
-            'health': 'good' if not warnings else 'warning'
+            "feature_stability": feature_stability,
+            "iaq_trend": float(iaq_trend),
+            "warnings": warnings,
+            "health": "good" if not warnings else "warning",
         }
 
 
@@ -359,8 +543,9 @@ class StreamingInference:
         self.last_prediction_time = 0
         self.dropped_readings = 0
 
-    def predict(self, readings: dict = None, force: bool = False,
-                **kwargs) -> Optional[Dict]:
+    def predict(
+        self, readings: dict = None, force: bool = False, **kwargs
+    ) -> Optional[Dict]:
         """Predict with rate limiting.
 
         Accepts a readings dict or keyword args for backward compatibility.
@@ -369,6 +554,7 @@ class StreamingInference:
             readings = kwargs
 
         import time
+
         current_time = time.time()
 
         if not force and (current_time - self.last_prediction_time) < self.min_interval:
@@ -383,11 +569,11 @@ class StreamingInference:
     def get_stats(self) -> Dict:
         """Get streaming statistics."""
         return {
-            'dropped_readings': self.dropped_readings,
-            'max_rate_hz': 1.0 / self.min_interval,
-            'buffer_status': {
-                'current_size': len(self.predictor.buffer),
-                'required_size': self.predictor.window_size,
-                'ready': len(self.predictor.buffer) >= self.predictor.window_size
-            }
+            "dropped_readings": self.dropped_readings,
+            "max_rate_hz": 1.0 / self.min_interval,
+            "buffer_status": {
+                "current_size": len(self.predictor.buffer),
+                "required_size": self.predictor.window_size,
+                "ready": len(self.predictor.buffer) >= self.predictor.window_size,
+            },
         }

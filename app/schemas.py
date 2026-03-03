@@ -12,16 +12,27 @@ class SensorReading(BaseModel):
     fields (temperature, rel_humidity, pressure, voc_resistance).  Both
     formats are supported for backward compatibility.
     """
+
     readings: Optional[Dict[str, float]] = Field(
         None, description="Sensor readings keyed by feature name"
     )
     prior_variables: Optional[Dict[str, float]] = Field(
-        None, description="External prior variables (e.g. {\"presence\": 1.0})"
+        None, description='External prior variables (e.g. {"presence": 1.0})'
     )
     iaq_actual: Optional[float] = Field(
         None, description="Actual IAQ score from sensor (e.g. BSEC IAQ)"
     )
     timestamp: Optional[str] = Field(None, description="ISO timestamp")
+    sensor_id: Optional[str] = Field(
+        None, description="Unique sensor hardware ID (serial number, MAC, etc.)"
+    )
+    firmware_version: Optional[str] = Field(
+        None, description="Firmware version of the sending sensor"
+    )
+    sequence_number: Optional[int] = Field(
+        None,
+        description="Monotonically increasing sequence number for ordering and replay detection",
+    )
 
     # Legacy BME680 fields — populated into ``readings`` if present
     temperature: Optional[float] = Field(None, exclude=True)
@@ -36,6 +47,7 @@ class SensorReading(BaseModel):
         if isinstance(values, dict):
             # Apply field mapping if configured
             from app.config import settings
+
             cfg = settings.load_model_config()
             field_mapping = cfg.get("sensor", {}).get("field_mapping", {})
             if field_mapping:
@@ -51,8 +63,17 @@ class SensorReading(BaseModel):
 
             # Merge legacy fields into readings when readings is absent
             if values.get("readings") is None:
-                legacy_keys = ["temperature", "rel_humidity", "pressure", "voc_resistance"]
-                legacy = {k: values[k] for k in legacy_keys if k in values and values[k] is not None}
+                legacy_keys = [
+                    "temperature",
+                    "rel_humidity",
+                    "pressure",
+                    "voc_resistance",
+                ]
+                legacy = {
+                    k: values[k]
+                    for k in legacy_keys
+                    if k in values and values[k] is not None
+                }
                 if legacy:
                     values["readings"] = legacy
         return values
@@ -66,8 +87,10 @@ class SensorReading(BaseModel):
 # Bayesian inference response structure
 # ---------------------------------------------------------------------------
 
+
 class PriorVariableEffect(BaseModel):
     """Effect of a single prior variable on the predictive distribution."""
+
     variable: str
     value: float
     state: str = Field(description="Resolved state (e.g. 'true' or 'false')")
@@ -78,6 +101,7 @@ class PriorVariableEffect(BaseModel):
 
 class BayesianUpdate(BaseModel):
     """Result of applying Gaussian conjugate update from prior variables."""
+
     pre_mean: float
     pre_std: float
     post_mean: float
@@ -87,6 +111,7 @@ class BayesianUpdate(BaseModel):
 
 class Observation(BaseModel):
     """Direct sensor measurements — the evidence conditioning our inference."""
+
     sensor_type: str
     readings: Dict[str, float]
     engineered_features: Optional[Dict[str, float]] = None
@@ -95,14 +120,18 @@ class Observation(BaseModel):
 
 class UncertaintyEstimate(BaseModel):
     """Quantified uncertainty around the predicted value."""
+
     std: float
     ci_lower: float = Field(description="Lower bound of 95% credible interval")
     ci_upper: float = Field(description="Upper bound of 95% credible interval")
-    method: str = Field(description="mc_dropout | weight_sampling | history_std | deterministic")
+    method: str = Field(
+        description="mc_dropout | weight_sampling | history_std | deterministic"
+    )
 
 
 class Predicted(BaseModel):
     """The model's predicted value for the latent IAQ variable given the evidence."""
+
     mean: float
     category: str
     uncertainty: Optional[UncertaintyEstimate] = None
@@ -111,6 +140,7 @@ class Predicted(BaseModel):
 
 class Prior(BaseModel):
     """Belief about IAQ before this observation — from recent history or training distribution."""
+
     mean: float
     std: float
     source: str = Field(description="history_window | training_distribution")
@@ -119,6 +149,7 @@ class Prior(BaseModel):
 
 class InferenceMetadata(BaseModel):
     """How the inference was performed."""
+
     model_config = ConfigDict(protected_namespaces=())
     model_type: str
     window_size: int
@@ -171,21 +202,27 @@ class ModelSelection(BaseModel):
 # Sensor registration (field mapping API)
 # ---------------------------------------------------------------------------
 
+
 class SensorRegisterRequest(BaseModel):
     """Request body for POST /sensors/register."""
+
     source_type: str = Field(
         "csv_headers",
         description="Source type: 'csv_headers' or 'example_payload'",
     )
     fields: List[str] = Field(..., description="List of source field names to map")
     sample_values: Optional[Dict[str, List[float]]] = Field(
-        None, description="Sample values per field for range validation",
+        None,
+        description="Sample values per field for range validation",
     )
     backend: str = Field("fuzzy", description="Mapping backend: 'fuzzy' or 'ollama'")
+    sensor_id: Optional[str] = Field(None, description="Unique sensor hardware ID")
+    firmware_version: Optional[str] = Field(None, description="Sensor firmware version")
 
 
 class FieldMatchResponse(BaseModel):
     """A single field mapping in the registration response."""
+
     source_field: str
     target_feature: str
     target_quantity: str
@@ -195,6 +232,7 @@ class FieldMatchResponse(BaseModel):
 
 class SensorRegisterResponse(BaseModel):
     """Response from POST /sensors/register."""
+
     mapping_id: str
     status: str = "proposed"
     mapping: List[FieldMatchResponse]
@@ -203,12 +241,17 @@ class SensorRegisterResponse(BaseModel):
 
 class SensorConfirmRequest(BaseModel):
     """Request body for POST /sensors/register/{mapping_id}/confirm."""
+
     overrides: Optional[Dict[str, str]] = Field(
-        None, description="Manual overrides: {source_field: target_feature}",
+        None,
+        description="Manual overrides: {source_field: target_feature}",
     )
 
 
 class SensorConfirmResponse(BaseModel):
     """Response from POST /sensors/register/{mapping_id}/confirm."""
+
     status: str = "confirmed"
     field_mapping: Dict[str, str]
+    sensor_id: Optional[str] = None
+    firmware_version: Optional[str] = None

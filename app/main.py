@@ -14,9 +14,16 @@ from typing import Dict
 from app.models import IAQPredictor
 from app.inference import InferenceEngine
 from app.schemas import (
-    SensorReading, IAQResponse, ModelInfo, HealthResponse, ModelSelection,
-    SensorRegisterRequest, SensorRegisterResponse, FieldMatchResponse,
-    SensorConfirmRequest, SensorConfirmResponse,
+    SensorReading,
+    IAQResponse,
+    ModelInfo,
+    HealthResponse,
+    ModelSelection,
+    SensorRegisterRequest,
+    SensorRegisterResponse,
+    FieldMatchResponse,
+    SensorConfirmRequest,
+    SensorConfirmResponse,
 )
 from app.config import settings
 from app.database import influx_manager
@@ -52,9 +59,13 @@ async def lifespan(app: FastAPI):
 
     for model_type, model_path in MODEL_PATHS.items():
         try:
-            predictor = IAQPredictor(model_type=model_type, window_size=settings.WINDOW_SIZE)
+            predictor = IAQPredictor(
+                model_type=model_type, window_size=settings.WINDOW_SIZE
+            )
             if not predictor.load_model(model_path):
-                logger.warning("No trained %s model found at %s", model_type.upper(), model_path)
+                logger.warning(
+                    "No trained %s model found at %s", model_type.upper(), model_path
+                )
                 continue
             predictors[model_type] = predictor
             inference_engines[model_type] = InferenceEngine(predictor)
@@ -74,18 +85,23 @@ async def lifespan(app: FastAPI):
             fallback = next(iter(predictors))
             logger.warning(
                 "Default model '%s' not available. Falling back to '%s'.",
-                active_model, fallback,
+                active_model,
+                fallback,
             )
             active_model = fallback
-        logger.info("Active model: %s  |  Available: %s", active_model, list(predictors.keys()))
+        logger.info(
+            "Active model: %s  |  Available: %s", active_model, list(predictors.keys())
+        )
 
     # Check InfluxDB connection
     if settings.INFLUX_ENABLED:
         db_status = influx_manager.health_check()
-        if db_status['status'] == 'healthy':
+        if db_status["status"] == "healthy":
             logger.info("InfluxDB connection established")
         else:
-            logger.warning(f"InfluxDB unavailable: {db_status.get('error', 'Unknown error')}")
+            logger.warning(
+                f"InfluxDB unavailable: {db_status.get('error', 'Unknown error')}"
+            )
 
     yield
 
@@ -134,7 +150,7 @@ async def health_check():
     return HealthResponse(
         status="healthy" if predictors else "degraded",
         models_available={m: m in predictors for m in MODEL_PATHS},
-        active_model=active_model
+        active_model=active_model,
     )
 
 
@@ -144,13 +160,13 @@ async def detailed_health_check():
     db_health = influx_manager.health_check()
 
     return {
-        'service': {
-            'status': 'healthy' if predictors else 'degraded',
-            'models_loaded': list(predictors.keys()),
-            'active_model': active_model
+        "service": {
+            "status": "healthy" if predictors else "degraded",
+            "models_loaded": list(predictors.keys()),
+            "active_model": active_model,
         },
-        'database': db_health,
-        'timestamp': datetime.utcnow().isoformat()
+        "database": db_health,
+        "timestamp": datetime.utcnow().isoformat(),
     }
 
 
@@ -161,15 +177,12 @@ async def list_models():
 
     for name, predictor in predictors.items():
         models_info[name] = {
-            'loaded': True,
-            'window_size': predictor.window_size,
-            'config': predictor.config
+            "loaded": True,
+            "window_size": predictor.window_size,
+            "config": predictor.config,
         }
 
-    return {
-        'active': active_model,
-        'available': models_info
-    }
+    return {"active": active_model, "available": models_info}
 
 
 @app.post("/model/select", dependencies=auth)
@@ -179,16 +192,15 @@ async def select_model(selection: ModelSelection):
 
     if selection.model_type not in predictors:
         raise HTTPException(
-            status_code=404,
-            detail=f"Model '{selection.model_type}' not loaded"
+            status_code=404, detail=f"Model '{selection.model_type}' not loaded"
         )
 
     active_model = selection.model_type
     logger.info(f"Switched to {active_model} model")
 
     return {
-        'active_model': active_model,
-        'message': f'Switched to {active_model} model'
+        "active_model": active_model,
+        "message": f"Switched to {active_model} model",
     }
 
 
@@ -213,17 +225,28 @@ async def predict_iaq(reading: SensorReading):
         result = engine.predict_single(
             sensor_readings,
             prior_variables=reading.prior_variables,
+            sensor_id=reading.sensor_id,
+            sequence_number=reading.sequence_number,
+            timestamp=reading.timestamp,
         )
 
         # Log prediction to InfluxDB if enabled and prediction was successful
-        if result.get('status') == 'ready' and result.get('iaq') is not None:
-            timestamp = reading.timestamp if reading.timestamp else datetime.utcnow().isoformat()
+        if result.get("status") == "ready" and result.get("iaq") is not None:
+            timestamp = (
+                reading.timestamp
+                if reading.timestamp
+                else datetime.utcnow().isoformat()
+            )
+            identity = settings.get_sensor_identity()
             influx_manager.write_prediction(
                 timestamp=timestamp,
                 readings=sensor_readings,
-                iaq_predicted=result['iaq'],
+                iaq_predicted=result["iaq"],
                 model_type=active_model,
                 iaq_actual=reading.iaq_actual,
+                sensor_id=reading.sensor_id or identity.get("sensor_id"),
+                firmware_version=reading.firmware_version
+                or identity.get("firmware_version"),
             )
 
         return IAQResponse(**result)
@@ -242,8 +265,7 @@ async def predict_with_uncertainty(reading: SensorReading):
     """
     if active_model not in inference_engines:
         raise HTTPException(
-            status_code=503,
-            detail=f"Active model '{active_model}' not available"
+            status_code=503, detail=f"Active model '{active_model}' not available"
         )
 
     try:
@@ -276,12 +298,9 @@ async def predict_compare(reading: SensorReading):
             results[name] = result
         except Exception as e:
             logger.error(f"Error with {name} model: {e}")
-            results[name] = {'error': str(e)}
+            results[name] = {"error": str(e)}
 
-    return {
-        'models': results,
-        'reading': reading.model_dump()
-    }
+    return {"models": results, "reading": reading.model_dump()}
 
 
 @app.post("/reset/all", dependencies=auth)
@@ -293,10 +312,7 @@ async def reset_all_buffers():
     for engine in inference_engines.values():
         engine.reset_history()
 
-    return {
-        'status': 'all buffers reset',
-        'models': list(predictors.keys())
-    }
+    return {"status": "all buffers reset", "models": list(predictors.keys())}
 
 
 @app.post("/reset/{model_type}", dependencies=auth)
@@ -308,9 +324,9 @@ async def reset_buffer(model_type: str):
     predictors[model_type].buffer = []
 
     return {
-        'model': model_type,
-        'status': 'buffer reset',
-        'window_size': predictors[model_type].window_size
+        "model": model_type,
+        "status": "buffer reset",
+        "window_size": predictors[model_type].window_size,
     }
 
 
@@ -323,10 +339,7 @@ async def get_statistics():
     engine = inference_engines[active_model]
     stats = engine.get_statistics()
 
-    return {
-        'model': active_model,
-        'statistics': stats
-    }
+    return {"model": active_model, "statistics": stats}
 
 
 @app.get("/statistics/{model_type}")
@@ -338,10 +351,7 @@ async def get_model_statistics(model_type: str):
     engine = inference_engines[model_type]
     stats = engine.get_statistics()
 
-    return {
-        'model': model_type,
-        'statistics': stats
-    }
+    return {"model": model_type, "statistics": stats}
 
 
 @app.get("/health/sensor")
@@ -355,19 +365,17 @@ async def check_sensor_health():
 
     if analysis is None:
         return {
-            'status': 'insufficient_data',
-            'message': 'Need at least 50 predictions to analyze sensor health'
+            "status": "insufficient_data",
+            "message": "Need at least 50 predictions to analyze sensor health",
         }
 
-    return {
-        'model': active_model,
-        'analysis': analysis
-    }
+    return {"model": active_model, "analysis": analysis}
 
 
 # =========================================================================
 # Sensor registration (field mapping API)
 # =========================================================================
+
 
 @app.post("/sensors/register", response_model=SensorRegisterResponse, dependencies=auth)
 async def register_sensor(req: SensorRegisterRequest):
@@ -385,7 +393,11 @@ async def register_sensor(req: SensorRegisterRequest):
     )
 
     mapping_id = str(uuid.uuid4())
-    _pending_mappings[mapping_id] = result
+    _pending_mappings[mapping_id] = {
+        "result": result,
+        "sensor_id": req.sensor_id,
+        "firmware_version": req.firmware_version,
+    }
 
     return SensorRegisterResponse(
         mapping_id=mapping_id,
@@ -404,15 +416,24 @@ async def register_sensor(req: SensorRegisterRequest):
     )
 
 
-@app.post("/sensors/register/{mapping_id}/confirm", response_model=SensorConfirmResponse, dependencies=auth)
+@app.post(
+    "/sensors/register/{mapping_id}/confirm",
+    response_model=SensorConfirmResponse,
+    dependencies=auth,
+)
 async def confirm_sensor_mapping(mapping_id: str, req: SensorConfirmRequest = None):
     """Persist a proposed mapping to model_config.yaml."""
     import yaml
 
     if mapping_id not in _pending_mappings:
-        raise HTTPException(status_code=404, detail=f"Mapping '{mapping_id}' not found or expired")
+        raise HTTPException(
+            status_code=404, detail=f"Mapping '{mapping_id}' not found or expired"
+        )
 
-    result = _pending_mappings.pop(mapping_id)
+    pending = _pending_mappings.pop(mapping_id)
+    result = pending["result"]
+    sensor_id = pending.get("sensor_id")
+    firmware_version = pending.get("firmware_version")
 
     # Build field_mapping dict
     field_mapping = {m.source_field: m.target_feature for m in result.matches}
@@ -428,12 +449,25 @@ async def confirm_sensor_mapping(mapping_id: str, req: SensorConfirmRequest = No
 
     cfg.setdefault("sensor", {})["field_mapping"] = field_mapping
 
+    # Persist sensor identity if provided
+    if sensor_id or firmware_version:
+        cfg.setdefault("sensor", {}).setdefault("identity", {})
+        if sensor_id:
+            cfg["sensor"]["identity"]["sensor_id"] = sensor_id
+        if firmware_version:
+            cfg["sensor"]["identity"]["firmware_version"] = firmware_version
+
     with open(config_path, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
     logger.info("Field mapping saved: %s", field_mapping)
 
-    return SensorConfirmResponse(status="confirmed", field_mapping=field_mapping)
+    return SensorConfirmResponse(
+        status="confirmed",
+        field_mapping=field_mapping,
+        sensor_id=sensor_id,
+        firmware_version=firmware_version,
+    )
 
 
 @app.get("/sensors", dependencies=auth)
@@ -444,6 +478,7 @@ async def get_sensor_mapping():
     return {
         "sensor_type": cfg.get("sensor", {}).get("type", "unknown"),
         "field_mapping": field_mapping,
+        "identity": cfg.get("sensor", {}).get("identity", {}),
     }
 
 
@@ -467,3 +502,17 @@ async def delete_sensor_mapping():
 
     logger.info("Field mapping removed from config")
     return {"status": "removed"}
+
+
+@app.get("/sensors/{sensor_id}/sequence", dependencies=auth)
+async def get_sensor_sequence(sensor_id: str):
+    """Get the current sequence state for a sensor.
+
+    Returns the last seen sequence number for the specified sensor,
+    enabling clients to check for dropped readings or sequence gaps.
+    """
+    engine = inference_engines.get(active_model)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="No active model loaded")
+
+    return engine.get_sequence_state(sensor_id)
