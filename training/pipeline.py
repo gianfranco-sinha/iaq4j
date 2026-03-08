@@ -494,13 +494,27 @@ class TrainingPipeline:
         profile = self._sensor_profile
         target_col = self._iaq_standard.target_column
 
+        import pandas as pd
+
         raw = self._df[profile.raw_features].values
 
         self._baselines = profile.compute_baselines(raw)
         if self._baselines:
             logger.info("Baselines: %s", self._baselines)
 
-        features_enhanced = profile.engineer_features(raw, self._baselines)
+        timestamps = (
+            self._df.index.values
+            if isinstance(self._df.index, pd.DatetimeIndex)
+            else None
+        )
+        if timestamps is not None:
+            logger.info("Temporal features enabled — DatetimeIndex detected")
+        else:
+            logger.warning(
+                "No DatetimeIndex found — temporal features will be zero-valued"
+            )
+
+        features_enhanced = profile.engineer_features(raw, self._baselines, timestamps=timestamps)
         targets = self._df[target_col].values
 
         # Store for next stage

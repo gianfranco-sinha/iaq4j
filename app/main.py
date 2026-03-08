@@ -55,12 +55,33 @@ async def lifespan(app: FastAPI):
     """Load models on startup."""
     global predictors, inference_engines, active_model
 
+    if settings.ENVIRONMENT == "production":
+        logger.warning(
+            "\n"
+            "╔══════════════════════════════════════════════════════════╗\n"
+            "║              *** PRODUCTION ENVIRONMENT ***              ║\n"
+            "╠══════════════════════════════════════════════════════════╣\n"
+            "║  Real sensor data and live InfluxDB writes are active.   ║\n"
+            "║  API key auth : %-8s                                ║\n"
+            "║  InfluxDB     : %-8s                                ║\n"
+            "║  Root path    : %-20s                   ║\n"
+            "║                                                          ║\n"
+            "║  Do NOT run training jobs against this instance          ║\n"
+            "║  without taking a backup first.                          ║\n"
+            "╚══════════════════════════════════════════════════════════╝",
+            "enabled" if settings.API_KEY else "DISABLED",
+            "enabled" if settings.INFLUX_ENABLED else "disabled",
+            os.getenv("ROOT_PATH", ""),
+        )
+
     logger.info("Loading IAQ prediction models...")
 
     for model_type, model_path in MODEL_PATHS.items():
         try:
+            model_cfg = settings.get_model_config(model_type)
+            window_size = model_cfg.get("window_size", 10)
             predictor = IAQPredictor(
-                model_type=model_type, window_size=settings.WINDOW_SIZE
+                model_type=model_type, window_size=window_size
             )
             if not predictor.load_model(model_path):
                 logger.warning(
@@ -232,14 +253,9 @@ async def predict_iaq(reading: SensorReading):
 
         # Log prediction to InfluxDB if enabled and prediction was successful
         if result.get("status") == "ready" and result.get("iaq") is not None:
-            timestamp = (
-                reading.timestamp
-                if reading.timestamp
-                else datetime.utcnow().isoformat()
-            )
             identity = settings.get_sensor_identity()
             influx_manager.write_prediction(
-                timestamp=timestamp,
+                timestamp=reading.timestamp,
                 readings=sensor_readings,
                 iaq_predicted=result["iaq"],
                 model_type=active_model,

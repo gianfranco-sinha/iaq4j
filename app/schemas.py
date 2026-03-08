@@ -22,7 +22,7 @@ class SensorReading(BaseModel):
     iaq_actual: Optional[float] = Field(
         None, description="Actual IAQ score from sensor (e.g. BSEC IAQ)"
     )
-    timestamp: Optional[str] = Field(None, description="ISO timestamp")
+    timestamp: str = Field(description="ISO 8601 timestamp (e.g. 2026-03-06T14:30:00Z)")
     sensor_id: Optional[str] = Field(
         None, description="Unique sensor hardware ID (serial number, MAC, etc.)"
     )
@@ -33,7 +33,6 @@ class SensorReading(BaseModel):
         None,
         description="Monotonically increasing sequence number for ordering and replay detection",
     )
-
     # Legacy BME680 fields — populated into ``readings`` if present
     temperature: Optional[float] = Field(None, exclude=True)
     rel_humidity: Optional[float] = Field(None, exclude=True)

@@ -28,7 +28,7 @@ class ModelTrainer:
         self,
         model_type: str,
         epochs: int = 200,
-        window_size: int = 10,
+        window_size: int = None,
         num_records: int = None,
         data_source: DataSource = None,
     ):
@@ -36,11 +36,12 @@ class ModelTrainer:
         if model_type not in ["mlp", "kan", "lstm", "cnn", "bnn"]:
             raise ValueError(f"Unsupported model type: {model_type}")
 
+        effective_window = window_size or settings.get_model_config(model_type).get("window_size", 10)
         source_label = data_source.name if data_source else "synthetic"
         print(f"Starting training for {model_type.upper()} model...")
         print(f"Configuration:")
         print(f"  - Epochs: {epochs}")
-        print(f"  - Window Size: {window_size}")
+        print(f"  - Window Size: {effective_window}")
         print(f"  - Data Source: {source_label}")
         print(f"  - Data Records: {num_records if num_records else 'All available'}")
 
@@ -67,7 +68,7 @@ class ModelTrainer:
             raise RuntimeError(f"Training failed for {model_type.upper()} model")
 
     def train_all_models(
-        self, epochs: int = 200, window_size: int = 10, num_records: int = None
+        self, epochs: int = 200, window_size: int = None, num_records: int = None
     ):
         """Train all models in registry."""
         models_to_train = ["mlp", "kan", "lstm", "cnn", "bnn"]

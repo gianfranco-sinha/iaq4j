@@ -8,6 +8,7 @@ Handles batch processing, streaming, and real-time predictions.
 
 import logging
 import math
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
@@ -128,6 +129,10 @@ class InferenceEngine:
         self.max_history = 1000
         self.last_sequences: Dict[str, int] = {}
         self.last_timestamps: Dict[str, float] = {}
+        self._last_reading_ts: Optional[datetime] = None
+        # Readings arriving more than this many seconds after the previous one
+        # are flagged as stale (gap > 2× typical 30 s BME680 LP interval).
+        self._staleness_threshold_seconds: float = 60.0
 
     def _validate_sequence(
         self,
@@ -320,6 +325,29 @@ class InferenceEngine:
         if readings is None:
             readings = kwargs
 
+        # Parse ISO timestamp to datetime for temporal features and staleness detection
+        parsed_ts: Optional[datetime] = None
+        if timestamp:
+            try:
+                parsed_ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                logger.warning("Could not parse timestamp '%s' — temporal features will be zero-valued", timestamp)
+
+        # Staleness detection: flag if gap since last reading exceeds threshold
+        stale = False
+        stale_gap: Optional[float] = None
+        if parsed_ts is not None and self._last_reading_ts is not None:
+            gap = (parsed_ts - self._last_reading_ts).total_seconds()
+            if gap > self._staleness_threshold_seconds:
+                stale = True
+                stale_gap = gap
+                logger.warning(
+                    "Stale reading detected: %.1fs gap (threshold %.0fs) — "
+                    "buffer may contain outdated context",
+                    gap,
+                    self._staleness_threshold_seconds,
+                )
+
         seq_validation = self._validate_sequence(sensor_id, sequence_number, timestamp)
 
         if seq_validation is not None:
@@ -339,7 +367,7 @@ class InferenceEngine:
         prior = self._compute_prior()
 
         mc = n_mc_samples if include_uncertainty else 1
-        result = self.predictor.predict(readings, n_mc_samples=mc)
+        result = self.predictor.predict(readings, n_mc_samples=mc, timestamp=parsed_ts)
 
         # Attach prior
         if prior is not None:
@@ -381,6 +409,11 @@ class InferenceEngine:
                     )
                     result["bayesian_update"] = update
 
+        # Attach staleness flag if detected
+        if stale:
+            result["stale"] = True
+            result["stale_gap_seconds"] = round(stale_gap, 1)
+
         # Add to history if prediction was successful
         if result.get("status") == "ready" and result.get("iaq") is not None:
             history_entry = dict(readings)
@@ -390,11 +423,13 @@ class InferenceEngine:
             if len(self.prediction_history) > self.max_history:
                 self.prediction_history.pop(0)
 
-            # Update sequence tracking
+            # Update sequence and timestamp tracking
             if sensor_id is not None and sequence_number is not None:
                 self.last_sequences[sensor_id] = sequence_number
                 if timestamp is not None:
                     self.last_timestamps[sensor_id] = timestamp
+            if parsed_ts is not None:
+                self._last_reading_ts = parsed_ts
 
             # Supplement with history-based uncertainty for models without dropout
             predicted = result.get("predicted", {})

@@ -2,9 +2,11 @@
 # File: app/builtin_profiles.py
 # Built-in sensor profiles and IAQ standards.
 # ============================================================================
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 from app.profiles import (
     IAQStandard,
@@ -50,14 +52,17 @@ class BME680Profile(SensorProfile):
 
     @property
     def engineered_feature_names(self) -> List[str]:
-        return ["voc_ratio", "abs_humidity"]
+        return ["voc_ratio", "abs_humidity", "hour_sin", "hour_cos", "dow_sin", "dow_cos"]
 
     def compute_baselines(self, raw: np.ndarray) -> Dict[str, float]:
         voc_idx = self.raw_features.index("voc_resistance")
         return {"voc_resistance": float(np.median(raw[:, voc_idx]))}
 
     def engineer_features(
-        self, raw: np.ndarray, baselines: Optional[Dict[str, float]] = None
+        self,
+        raw: np.ndarray,
+        baselines: Optional[Dict[str, float]] = None,
+        timestamps: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         from training.utils import calculate_absolute_humidity
 
@@ -71,16 +76,35 @@ class BME680Profile(SensorProfile):
             else float(np.median(raw[:, voc_idx]))
         )
         voc_ratio = raw[:, voc_idx] / baseline_voc
-        abs_humidity = calculate_absolute_humidity(
-            raw[:, temp_idx], raw[:, hum_idx]
-        )
+        abs_humidity = calculate_absolute_humidity(raw[:, temp_idx], raw[:, hum_idx])
 
-        return np.column_stack(
-            [raw, voc_ratio.reshape(-1, 1), abs_humidity.reshape(-1, 1)]
-        )
+        # Temporal cyclical features
+        if timestamps is not None:
+            ts_index = pd.DatetimeIndex(timestamps)
+            hours = ts_index.hour.values.astype(float)
+            dows = ts_index.dayofweek.values.astype(float)
+        else:
+            hours = np.zeros(len(raw))
+            dows = np.zeros(len(raw))
+
+        hour_sin, hour_cos = self._cyclical_encode(hours, 24.0)
+        dow_sin, dow_cos = self._cyclical_encode(dows, 7.0)
+
+        return np.column_stack([
+            raw,
+            voc_ratio.reshape(-1, 1),
+            abs_humidity.reshape(-1, 1),
+            hour_sin.reshape(-1, 1),
+            hour_cos.reshape(-1, 1),
+            dow_sin.reshape(-1, 1),
+            dow_cos.reshape(-1, 1),
+        ])
 
     def engineer_features_single(
-        self, reading: Dict[str, float], baselines: Optional[Dict[str, float]] = None
+        self,
+        reading: Dict[str, float],
+        baselines: Optional[Dict[str, float]] = None,
+        timestamp: Optional[datetime] = None,
     ) -> np.ndarray:
         from training.utils import calculate_absolute_humidity
 
@@ -97,7 +121,15 @@ class BME680Profile(SensorProfile):
             np.array([reading["rel_humidity"]]),
         )[0]
 
-        return np.array(raw_vals + [voc_ratio, abs_hum])
+        hour = float(timestamp.hour) if timestamp is not None else 0.0
+        dow = float(timestamp.weekday()) if timestamp is not None else 0.0
+
+        hour_sin, hour_cos = self._cyclical_encode(np.array([hour]), 24.0)
+        dow_sin, dow_cos = self._cyclical_encode(np.array([dow]), 7.0)
+
+        return np.array(raw_vals + [voc_ratio, abs_hum,
+                                    hour_sin[0], hour_cos[0],
+                                    dow_sin[0], dow_cos[0]])
 
 
 class BSECStandard(IAQStandard):
@@ -151,7 +183,10 @@ class SPS30Profile(SensorProfile):
         return ["pm25_pm10_ratio", "pm1_pm25_ratio"]
 
     def engineer_features(
-        self, raw: np.ndarray, baselines: Optional[Dict[str, float]] = None
+        self,
+        raw: np.ndarray,
+        baselines: Optional[Dict[str, float]] = None,
+        timestamps: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         pm1_idx = self.raw_features.index("pm1_0")
         pm25_idx = self.raw_features.index("pm2_5")
@@ -165,7 +200,10 @@ class SPS30Profile(SensorProfile):
         )
 
     def engineer_features_single(
-        self, reading: Dict[str, float], baselines: Optional[Dict[str, float]] = None
+        self,
+        reading: Dict[str, float],
+        baselines: Optional[Dict[str, float]] = None,
+        timestamp: Optional[datetime] = None,
     ) -> np.ndarray:
         raw_vals = [reading[f] for f in self.raw_features]
 

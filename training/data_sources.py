@@ -600,9 +600,27 @@ class SyntheticSource(DataSource):
                 self.num_samples, profile.quality_min
             )
 
-        df = pd.DataFrame(data)
+        # Build a DatetimeIndex spread across a full week so temporal features
+        # (hour_sin/cos, dow_sin/cos) have realistic variety during training.
+        # Timestamps are random within the week and sorted chronologically to
+        # preserve the pipeline's required monotonic ordering.
+        week_start = pd.Timestamp("2024-01-01 00:00:00", tz="UTC")
+        week_end = pd.Timestamp("2024-01-08 00:00:00", tz="UTC")
+        random_seconds = rng.integers(
+            int(week_start.timestamp()),
+            int(week_end.timestamp()),
+            size=self.num_samples,
+        )
+        index = pd.to_datetime(np.sort(random_seconds), unit="s", utc=True)
+
+        df = pd.DataFrame(data, index=index)
         logger.info(
-            "Generated %d synthetic samples (seed=%d)", self.num_samples, self.seed
+            "Generated %d synthetic samples (seed=%d) with DatetimeIndex "
+            "spanning %s to %s",
+            self.num_samples,
+            self.seed,
+            index[0],
+            index[-1],
         )
 
         return df

@@ -301,21 +301,24 @@ def build_model(model_type: str, window_size: int = 10, num_features: int = 6) -
     ModelCls = MODEL_REGISTRY[model_type]
     cfg = settings.get_model_config(model_type)
 
+    effective_window = cfg.get("window_size", window_size)
+    effective_features = cfg.get("num_features", num_features)
+
     if model_type == "mlp":
         return ModelCls(
-            input_dim=window_size * num_features,
+            input_dim=effective_window * effective_features,
             hidden_dims=cfg.get("hidden_dims", [64, 32, 16]),
             dropout=cfg.get("dropout", 0.2),
         )
     elif model_type == "kan":
         return ModelCls(
-            input_dim=window_size * num_features,
+            input_dim=effective_window * effective_features,
             hidden_dims=cfg.get("hidden_dims", [32, 16]),
         )
     elif model_type == "lstm":
         return ModelCls(
-            window_size=cfg.get("window_size", window_size),
-            num_features=cfg.get("num_features", num_features),
+            window_size=effective_window,
+            num_features=effective_features,
             hidden_size=cfg.get("hidden_size", 128),
             num_layers=cfg.get("num_layers", 2),
             dropout=cfg.get("dropout", 0.3),
@@ -323,15 +326,15 @@ def build_model(model_type: str, window_size: int = 10, num_features: int = 6) -
         )
     elif model_type == "cnn":
         return ModelCls(
-            window_size=cfg.get("window_size", window_size),
-            num_features=cfg.get("num_features", num_features),
+            window_size=effective_window,
+            num_features=effective_features,
             num_filters=cfg.get("num_filters", [64, 128, 256]),
             kernel_sizes=cfg.get("kernel_sizes", [3, 3, 3]),
             dropout=cfg.get("dropout", 0.3),
         )
     elif model_type == "bnn":
         return ModelCls(
-            input_dim=window_size * num_features,
+            input_dim=effective_window * effective_features,
             hidden_dims=cfg.get("hidden_dims", [64, 32, 16]),
             prior_sigma=cfg.get("prior_sigma", 1.0),
         )
@@ -544,7 +547,7 @@ class IAQPredictor:
         return np.array(predictions)
 
     def predict(self, readings: dict = None, n_mc_samples: int = 1,
-                **kwargs) -> dict:
+                timestamp=None, **kwargs) -> dict:
         """Predict IAQ from sensor readings.
 
         Accepts either a readings dict or keyword arguments for backward
@@ -565,7 +568,7 @@ class IAQPredictor:
         try:
             # Step 1: profile-driven feature engineering
             features = self.sensor_profile.engineer_features_single(
-                readings, self._baselines
+                readings, self._baselines, timestamp=timestamp
             )
 
             # Step 2: buffer (all models use windowed input)

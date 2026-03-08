@@ -3,6 +3,7 @@
 # Core abstractions for sensor-agnostic, IAQ-standard-agnostic architecture.
 # ============================================================================
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -103,6 +104,17 @@ class SensorProfile(ABC):
         """All feature names in order."""
         return self.raw_features + self.engineered_feature_names
 
+    @staticmethod
+    def _cyclical_encode(
+        values: np.ndarray, period: float
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Encode values as (sin, cos) pair for cyclical continuity.
+
+        e.g. hour-of-day with period=24, day-of-week with period=7.
+        """
+        angle = 2 * np.pi * values / period
+        return np.sin(angle), np.cos(angle)
+
     def compute_baselines(self, raw: np.ndarray) -> Dict[str, float]:
         """Compute baseline values from training data (e.g. median gas resistance).
         Override in subclass if needed. Returns empty dict by default."""
@@ -110,13 +122,18 @@ class SensorProfile(ABC):
 
     @abstractmethod
     def engineer_features(
-        self, raw: np.ndarray, baselines: Optional[Dict[str, float]] = None
+        self,
+        raw: np.ndarray,
+        baselines: Optional[Dict[str, float]] = None,
+        timestamps: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Batch feature engineering for training.
 
         Args:
             raw: shape (n_samples, len(raw_features)), columns in raw_features order.
             baselines: dict from compute_baselines().
+            timestamps: DatetimeIndex values array (dtype datetime64) for temporal
+                feature engineering. None when source has no timestamp index.
 
         Returns:
             shape (n_samples, total_features) — raw columns plus engineered columns.
@@ -125,13 +142,18 @@ class SensorProfile(ABC):
 
     @abstractmethod
     def engineer_features_single(
-        self, reading: Dict[str, float], baselines: Optional[Dict[str, float]] = None
+        self,
+        reading: Dict[str, float],
+        baselines: Optional[Dict[str, float]] = None,
+        timestamp: Optional[datetime] = None,
     ) -> np.ndarray:
         """Single-reading feature engineering for real-time inference.
 
         Args:
             reading: dict mapping raw feature names to values.
             baselines: dict from compute_baselines().
+            timestamp: reading datetime for temporal feature engineering.
+                None falls back to zero-valued cyclical features.
 
         Returns:
             1D array of length total_features.

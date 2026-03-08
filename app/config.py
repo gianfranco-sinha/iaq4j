@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     API_KEY: str = ""  # empty = auth disabled (dev mode)
+    ENVIRONMENT: str = "development"  # set to "production" in production deployments
 
     # Model settings
     DEFAULT_MODEL: str = "mlp"
@@ -23,7 +24,6 @@ class Settings(BaseSettings):
     CNN_MODEL_PATH: str = "trained_models/cnn"
     LSTM_MODEL_PATH: str = "trained_models/lstm"
     BNN_MODEL_PATH: str = "trained_models/bnn"
-    WINDOW_SIZE: int = 10
 
     # YAML configuration paths
     MODEL_CONFIG_PATH: str = "model_config.yaml"
@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # InfluxDB defaults
     INFLUX_ENABLED: bool = False
-    INFLUX_HOST: str = "87.106.102.14"
+    INFLUX_HOST: str = "localhost"
     INFLUX_PORT: int = 8086
     INFLUX_DATABASE: str = "home_study_room_iaq"
     INFLUX_USERNAME: str = ""
@@ -74,14 +74,14 @@ class Settings(BaseSettings):
                 "device": "cpu",
                 "default_dropout": 0.2,
             },
-            "mlp": {"hidden_dims": [64, 32, 16], "dropout": 0.2, "input_dim": 4},
-            "kan": {"hidden_dims": [32, 16], "input_dim": 4},
+            "mlp": {"hidden_dims": [64, 32, 16], "dropout": 0.2, "input_dim": 4, "window_size": 10},
+            "kan": {"hidden_dims": [32, 16], "input_dim": 4, "window_size": 10},
             "lstm": {
                 "hidden_size": 128,
                 "num_layers": 2,
                 "dropout": 0.3,
                 "bidirectional": True,
-                "window_size": 10,
+                "window_size": 60,
                 "num_features": 4,
                 "fc_layers": [64, 32],
             },
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
                 "num_filters": [64, 128, 256],
                 "kernel_sizes": [3, 3, 3],
                 "dropout": 0.3,
-                "window_size": 10,
+                "window_size": 30,
                 "num_features": 4,
                 "fc_layers": [128, 64],
             },
@@ -98,6 +98,7 @@ class Settings(BaseSettings):
                 "prior_sigma": 1.0,
                 "kl_weight": 1.0,
                 "input_dim": 6,
+                "window_size": 10,
             },
         }
 
@@ -204,7 +205,7 @@ class Settings(BaseSettings):
         """Get default database configuration when YAML is not available."""
         return {
             "influxdb": {
-                "host": "87.106.102.14",
+                "host": "localhost",
                 "port": 8086,
                 "database": "home_study_room_iaq",
                 "username": "",

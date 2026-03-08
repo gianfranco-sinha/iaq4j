@@ -43,7 +43,10 @@ def create_parser():
         help="Number of training epochs (default: 200)",
     )
     train_parser.add_argument(
-        "--window-size", type=int, default=10, help="Sliding window size (default: 10)"
+        "--window-size",
+        type=int,
+        default=None,
+        help="Sliding window size (default: reads per-model value from model_config.yaml)",
     )
     train_parser.add_argument(
         "--data-records",

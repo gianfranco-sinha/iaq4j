@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def train_single_model(
     model_type: str,
     epochs: int = 200,
-    window_size: int = 10,
+    window_size: Optional[int] = None,
     num_records: int = None,
     data_source: DataSource = None,
     experiment_name: str = "iaq4j",
@@ -25,7 +25,7 @@ def train_single_model(
     Args:
         model_type: One of "mlp", "kan", "lstm", "cnn", "bnn".
         epochs: Number of training epochs.
-        window_size: Sliding window size.
+        window_size: Sliding window size. If None, reads from model_config.yaml.
         num_records: Number of synthetic samples (ignored when data_source is provided).
         data_source: Data source to use. Defaults to SyntheticSource.
         experiment_name: MLflow experiment name.
@@ -36,6 +36,9 @@ def train_single_model(
     Raises:
         PipelineError: if any pipeline stage fails.
     """
+    if window_size is None:
+        from app.config import settings
+        window_size = settings.get_model_config(model_type).get("window_size", 10)
     mlflow.set_experiment(experiment_name)
 
     if data_source is None:

@@ -8,6 +8,7 @@ import pickle
 import json
 import os
 from app.models import MLPRegressor, CNNRegressor, KANRegressor, LSTMRegressor, BNNRegressor
+from app.config import settings
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import numpy as np
 
@@ -17,9 +18,10 @@ def create_dummy_model(model_type="mlp", model_dir="trained_models/mlp"):
 
     os.makedirs(model_dir, exist_ok=True)
 
-    window_size = 10
-    num_features = 6
-    input_dim = window_size * num_features  # 60
+    model_cfg = settings.get_model_config(model_type)
+    window_size = model_cfg.get("window_size", 10)
+    num_features = model_cfg.get("num_features", 6)
+    input_dim = window_size * num_features
 
     # Create model
     if model_type == "mlp":

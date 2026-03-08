@@ -6,10 +6,11 @@
 
 # Global settings that apply to all models
 global:
-  # Window size for temporal models (LSTM, CNN)
+  # Fallback window_size used if a model does not define its own.
+  # Each model section should declare its own window_size — see notes below.
   window_size: 10
-  # Number of input features (4 raw + 2 engineered: voc_ratio, abs_humidity)
-  num_features: 6
+  # Number of input features (4 raw + 6 engineered: voc_ratio, abs_humidity, hour_sin, hour_cos, dow_sin, dow_cos)
+  num_features: 10
   # Default device for inference (cpu/cuda)
   device: "cpu"
   # Dropout rate shared across models (can be overridden per model)
@@ -23,17 +24,22 @@ mlp:
   activation: "relu"           # Activation function (relu/tanh/sigmoid)
   use_batch_norm: true         # Whether to use batch normalization
   # Input parameters
-  input_dim: 6                 # Number of input features
+  input_dim: 10                # Number of input features
+  # MLP flattens the window — temporal order is ignored. A small window keeps
+  # input_dim manageable without losing much signal.
+  window_size: 10
 
 # KAN (Kolmogorov-Arnold Networks) configuration
 kan:
   # Architecture parameters
   hidden_dims: [32, 16]        # Hidden layer dimensions
   # Input parameters
-  input_dim: 6                 # Number of input features
+  input_dim: 10                # Number of input features
   # KAN-specific parameters
   grid_size: 5                 # Grid size for KAN
   spline_order: 3              # Spline order for KAN
+  # KAN flattens the window like MLP — small window is fine.
+  window_size: 10
 
 # LSTM (Long Short-Term Memory) configuration
 lstm:
@@ -43,8 +49,10 @@ lstm:
   dropout: 0.3                 # Dropout rate (overrides global.default_dropout)
   bidirectional: true          # Whether to use bidirectional LSTM
   # Input parameters
-  window_size: 10              # Length of input sequences (overrides global.window_size)
-  num_features: 6              # Number of input features (overrides global.num_features)
+  # LSTM exploits temporal ordering. At BME680 LP mode (~3 s/sample), 60 readings
+  # = ~3 minutes of context — enough to capture VOC stabilisation dynamics.
+  window_size: 60
+  num_features: 10             # Number of input features (overrides global.num_features)
   # Fully connected layers after LSTM
   fc_layers: [64, 32]          # FC layer dimensions before output
 
@@ -55,8 +63,10 @@ cnn:
   kernel_sizes: [3, 3, 3]      # Kernel sizes for each conv layer
   dropout: 0.3                 # Dropout rate (overrides global.default_dropout)
   # Input parameters
-  window_size: 10              # Length of input sequences (overrides global.window_size)
-  num_features: 6              # Number of input features (overrides global.num_features)
+  # CNN needs enough temporal width for kernels to detect meaningful patterns.
+  # At ~3 s/sample, 30 readings = ~90 seconds of context.
+  window_size: 30
+  num_features: 10             # Number of input features (overrides global.num_features)
   # Fully connected layers after convolutions
   fc_layers: [128, 64]         # FC layer dimensions before output
 
@@ -68,6 +78,8 @@ bnn:
   kl_weight: 1.0                 # KL divergence weight in ELBO loss
   # Input parameters
   input_dim: 6                   # Number of input features
+  # BNN flattens the window like MLP — small window is fine.
+  window_size: 10
   # User-declared prior variables — external signals that shift the predictive
   # distribution via Gaussian conjugate update (no retraining required).
   prior_variables:
