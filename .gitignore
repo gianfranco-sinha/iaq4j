@@ -26,6 +26,7 @@ build/
 
 # Environment variables
 .env
+app/config.env
 
 # Caches
 .ruff_cache/

@@ -100,7 +100,7 @@ Both paths save artifacts to `trained_models/{model_type}/` (model.pt, config.js
 
 ## Deployment
 
-**Production server**: `pi@87.106.102.14` → `/home/pi/iaq4j/`
+**Production server**: `pi@<production-host>` → `/home/pi/iaq4j/`
 
 ```bash
 # Full deploy (rsync + deps + systemd restart + nginx + verify)
@@ -110,7 +110,7 @@ bash deploy/deploy.sh
 docker compose up -d
 
 # View production logs
-ssh pi@87.106.102.14 'journalctl -u iaq4j -f'
+ssh pi@<production-host> 'journalctl -u iaq4j -f'
 ```
 
 - **Systemd service** (`deploy/iaq4j.service`): runs uvicorn on `127.0.0.1:8001` as user `pi`

@@ -5,6 +5,30 @@ marked with priority: **P0** (next up), **P1** (soon), **P2** (later).
 
 ---
 
+## Implementation Order
+
+**Canonical sequence — ordered by impact, effort, and hard dependencies.**
+Items must be completed in this order. Do not start an item until all items
+above it are fully complete (all checkboxes ticked).
+
+| # | Item | Priority | Rationale |
+|---|---|---|---|
+| 1 | ~~**Temporal Feature Engineering**~~ ✅ | P0 | Retrain is already required (window_size change broke all artifacts). Fully implement staleness detection, SyntheticSource timestamps, and cyclical time features before retraining. Starting any other work on top of stale artifacts is wasteful. |
+| 2 | **Security Hardening** (HTTPS, rate limiting, headers) | P0 | Production gaps that exist right now. Cannot responsibly expose new endpoints from LLM Readiness without first hardening the surface. |
+| 3 | **MLflow Integration** (remaining work) | P1 | Completes observability. Required before LLM Readiness so that training runs are fully auditable when the agent starts triggering them. |
+| 4 | **LLM Readiness — Phase 1** (structured internals) | P1 | Plumbing prerequisite for all agent work: config cache, InfluxDB reads, typed exceptions, `APIError`. No user-facing changes. |
+| 5 | **LLM Readiness — Phase 2** (agent tool surface) | P1 | REST endpoints that expose all components to the agent. Depends on Phase 1. |
+| 6 | **LLM Agent** | P2 | Orchestration layer. Depends on LLM Readiness Phase 1 + 2. |
+| 7 | **LLM Readiness — Phase 3** (pipeline design tools) | P2 | New endpoints for sensor inventory, pipeline spec design/validate/commit. Prerequisite for LLM-Driven Pipeline Design. |
+| 8 | **LLM-Driven Pipeline Design** | P2 | LLM as full pipeline designer (feature engineering + model selection). Depends on LLM Readiness Phase 1 + 2 + 3. |
+
+**Parked (no fixed order):**
+- Artifact Versioning remaining (dataset semver, migration guide) — pick up opportunistically
+- Telemetry Integrity remaining — pick up alongside LLM Readiness Phase 1
+- Sensor Onboarding remaining (background tasks) — pick up alongside LLM Readiness Phase 2
+
+---
+
 ## Artifact Versioning
 
 ### Semantic versioning for models and datasets — P1
@@ -620,7 +644,7 @@ DELETE /sensors/{sensor_name}
 
 ## Security Hardening
 
-### Production security improvements — P1
+### Production security improvements — P0
 
 **Current state:** Service is behind nginx reverse proxy but has several gaps.
 
@@ -824,11 +848,66 @@ returns structured JSON that maps 1:1 to an agent tool.
 
 ---
 
-#### Phase 3: Agent Loop
+#### Phase 3: Pipeline Design Tool Surface
 
-Phase 3 is the existing **LLM Agent** roadmap item below. It depends on
+**Must be complete before LLM-Driven Pipeline Design can be implemented.**
+
+The LLM pipeline designer needs tools that don't yet exist anywhere in the
+system. It must be able to inspect what training data is available, read and
+write pipeline specs, and validate its own proposals before committing them.
+
+**New endpoints:**
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /sensors/inventory` | Query InfluxDB for what measurements exist, their time range, row count, and sampling interval — the LLM must know what training data it can actually use before reasoning about sensor asymmetry |
+| `GET /pipeline/spec/{model_type}` | Read the persisted `PipelineSpec` for a deployed model — LLM inspects existing designs before creating new ones |
+| `POST /pipeline/design` | Core endpoint — accepts `ProblemStatement` + `SensorInventory`, invokes LLM, returns a `PipelineSpec` proposal for user review |
+| `POST /pipeline/validate` | Validate a `PipelineSpec` before committing — checks formulas are safe (AST evaluator), features are computable from declared sensors, recommended model type exists |
+| `POST /pipeline/commit` | Persist a validated `PipelineSpec` as a YAML artifact, write `pipeline_spec_path` to `model_config.yaml`, invalidate config cache |
+| `GET /training/history` | All past training runs with metrics, model types, data fingerprints — LLM uses this to assess whether a model recommendation is feasible given data quantity |
+
+**Why `GET /sensors/inventory` is the critical prerequisite:**
+
+The LLM cannot reason about the training vs inference sensor asymmetry
+unless it knows what measurements are actually present in InfluxDB, their
+time coverage, and whether enough data exists to learn from a privileged
+signal (e.g. 1000 hours of presence sensor data alongside VOC). Without
+this, the LLM is guessing about data availability.
+
+**New domain objects required before these endpoints can be built:**
+
+| Object | File | Description |
+|---|---|---|
+| `SensorInventoryEntry` | `app/schemas.py` | Measurement name, time range, row count, median interval, null rate |
+| `ProblemStatement` | `app/schemas.py` | Natural language goal + optional constraints |
+| `SensorInventory` | `app/schemas.py` | Training sensors, inference sensors (the asymmetry) |
+| `FeatureSpec` | `app/schemas.py` | Always-available features, supervision signals, formulas, rationale |
+| `ModelSpec` | `app/schemas.py` | Recommended model, reasoning, alternatives, hyperparameter hints |
+| `PipelineSpec` | `app/schemas.py` | Composite of `FeatureSpec` + `ModelSpec` |
+
+**Requirements (Phase 3):**
+
+- [ ] `app/database.py`: add `query_sensor_inventory()` — list measurements in InfluxDB with time range, count, median interval
+- [ ] `app/schemas.py`: add `SensorInventoryEntry`, `ProblemStatement`, `SensorInventory`, `FeatureSpec`, `ModelSpec`, `PipelineSpec` Pydantic models
+- [ ] `GET /sensors/inventory` — calls `query_sensor_inventory()`, returns `List[SensorInventoryEntry]`
+- [ ] `GET /pipeline/spec/{model_type}` — reads persisted `PipelineSpec` YAML from `trained_models/{model_type}/`
+- [ ] `POST /pipeline/design` — LLM prompt wired to quantities registry + sensor inventory; returns `PipelineSpec`
+- [ ] `POST /pipeline/validate` — runs AST safety check on formulas; validates sensor availability; returns validation report
+- [ ] `POST /pipeline/commit` — persists `PipelineSpec` YAML, updates `model_config.yaml`, invalidates cache
+- [ ] `GET /training/history` — aggregates past run metrics from `MANIFEST.json` files across all model types
+- [ ] LLM backend for pipeline design reuses pluggable pattern from `app/field_mapper.py`
+- [ ] `pipeline_spec_hash` added to schema fingerprint computation in `training/utils.py`
+
+---
+
+#### Phase 4: Agent Loop
+
+Phase 4 is the existing **LLM Agent** roadmap item below. It depends on
 Phase 1 (structured internals) and Phase 2 (REST tool surface) being
 complete. The agent's tool registry maps 1:1 to Phase 2 endpoints.
+
+The LLM-Driven Pipeline Design feature depends on Phase 1 + 2 + 3.
 
 ---
 
@@ -943,5 +1022,229 @@ GET    /agent/tasks
 - [ ] Conversation history (per-session) for multi-turn interactions
 - [ ] Ollama / Anthropic backend selection via config
 - [ ] Guardrails: agent can read data and trigger training but cannot modify production model without user confirmation
+
+---
+
+## Temporal Feature Engineering
+
+### Cyclical time features for diurnal and weekly IAQ patterns — P0 (implement first)
+
+**Background:** Audit (Mar 2026) found the models are fully blind to when a
+reading occurs. Indoor air quality has strong diurnal and weekly patterns
+(morning cooking peaks, occupancy cycles, heating/cooling seasons) that are
+invisible to the current feature set. All five model types receive only
+physical sensor readings + two engineered features (`voc_ratio`,
+`abs_humidity`).
+
+**Temporal awareness audit summary:**
+
+| Aspect | Status |
+|---|---|
+| Timestamp stored on `SensorReading` | ✅ Optional ISO string |
+| Chronological train/val split | ✅ No shuffling |
+| Gap detection + longest contiguous segment | ✅ `training/pipeline.py` |
+| Sequence number replay/regression detection | ✅ `app/inference.py` |
+| Timestamps written to InfluxDB | ✅ Every prediction |
+| Time-based features (hour, day-of-week, seasonal) | ❌ None |
+| Staleness detection (slow/delayed readings) | ❌ None |
+| Synthetic data timestamps | ❌ `SyntheticSource` uses `RangeIndex` |
+
+**Proposed changes (~1 hour implementation):**
+
+1. Add 4 cyclical time features to `BME680Profile.engineer_features()` and
+   `engineer_features_single()` in `app/builtin_profiles.py`:
+   - `hour_sin` = sin(2π × hour / 24)
+   - `hour_cos` = cos(2π × hour / 24)
+   - `dow_sin`  = sin(2π × day_of_week / 7)
+   - `dow_cos`  = cos(2π × day_of_week / 7)
+2. Update `SensorProfile` ABC signatures in `app/profiles.py` to accept
+   optional timestamp in both `engineer_features()` and
+   `engineer_features_single()`.
+3. Pass `SensorReading.timestamp` through `IAQPredictor.predict()` →
+   `engineer_features_single()` in `app/models.py`.
+4. Pass `DatetimeIndex` through FEATURE_ENGINEERING stage in
+   `training/pipeline.py`.
+5. Update `num_features` 6 → 10 in `model_config.yaml` and `app/config.py`
+   (affects `input_dim` for MLP, KAN, BNN).
+6. Add synthetic `DatetimeIndex` to `SyntheticSource` in
+   `training/data_sources.py` so time features can be exercised without real
+   data.
+
+**Breaking changes:**
+- `num_features` 6 → 10 changes the schema fingerprint → MAJOR version bump
+  on all 5 models. Full retrain required.
+- All existing trained artifacts become incompatible.
+
+**Decision deferred because:** LSTM `window_size` 10→60 and CNN 10→30 already
+require a full retrain (MAJOR bump). Implement time features in the same
+retrain cycle to avoid paying the retrain cost twice.
+
+**Timestamp availability:** All InfluxDB training data has timestamps so
+missing-timestamp fallback at inference time is a non-issue in practice.
+`SensorReading.timestamp` is `Optional[str]`; if absent at inference time,
+fall back to `datetime.utcnow()` (server receive time).
+
+**Requirements:**
+
+- [x] `BME680Profile.engineer_features()` generates `hour_sin`, `hour_cos`, `dow_sin`, `dow_cos` from DatetimeIndex
+- [x] `BME680Profile.engineer_features_single()` generates same features from optional timestamp (fallback: zeros)
+- [x] `SensorProfile` ABC updated — both methods accept `Optional[datetime]` / `Optional[np.ndarray]`
+- [x] `IAQPredictor.predict()` extracts and forwards timestamp to profile
+- [x] `training/pipeline.py` FEATURE_ENGINEERING stage passes DatetimeIndex to profile
+- [x] `SyntheticSource` generates a realistic `DatetimeIndex` (random timestamps spanning 1 week)
+- [x] `num_features` updated to 10 everywhere (`model_config.yaml`, `app/config.py` defaults)
+- [x] Staleness detection added to `InferenceEngine` — flags readings with gap > 60 s
+- [ ] All 5 models retrained after implementation
+
+---
+
+## LLM-Driven Pipeline Design
+
+### LLM as domain reasoner for feature engineering and model selection — P2
+
+**Depends on:** LLM Readiness Phase 1 + Phase 2 + Phase 3 (all must be complete first)
+
+- Phase 1: structured internals (config cache, InfluxDB reads, typed exceptions, `APIError`)
+- Phase 2: agent tool surface (profiles, quantities, models, history, training endpoints)
+- Phase 3: pipeline design tools (`GET /sensors/inventory`, `POST /pipeline/design`, `POST /pipeline/validate`, `POST /pipeline/commit`, `GET /pipeline/spec/{model_type}`, `GET /training/history`)
+
+**Background:** Current architecture conflates two concerns in `SensorProfile.engineer_features()`:
+- *Feature engineering* — the intellectual decision of which features are meaningful
+- *Feature extraction* — the deterministic computation of those features from raw data
+
+Both are currently hardcoded Python. This item introduces a principled separation
+where a domain-reasoning LLM owns both engineering decisions **and model architecture
+selection**, while Python owns deterministic execution.
+
+**Motivating example:**
+
+> Problem: "How does air quality change when a person enters a room?"
+>
+> Training sensors: VOC, temperature, relative humidity, presence sensor (mm-wave radar)
+> Inference sensors: VOC, temperature, relative humidity only (no presence sensor)
+>
+> The LLM reasons:
+> 1. **Features** — Human presence causes VOC to rise (breath, skin emissions),
+>    temperature to increase slightly, humidity to increase from breathing. The
+>    presence sensor is *privileged information* — available during training as a
+>    supervision signal but absent at inference. Therefore engineer proxy features
+>    (dVOC/dt, temperature gradient, humidity derivative, interaction terms) that
+>    capture the presence signature from always-available sensors alone.
+>
+> 2. **Model** — We are inferring a latent variable (presence) from indirect
+>    observations with prior knowledge from training data. This is a Bayesian
+>    inference problem. Recommend BNN — it gives P(IAQ | sensors) with calibrated
+>    uncertainty and can be extended to P(presence | sensors) as an auxiliary output.
+>    A deterministic MLP or LSTM would underfit the uncertainty in this latent
+>    variable problem.
+
+The LLM acts as a **full pipeline designer**: it reasons about the problem structure,
+the data asymmetry, and selects the model family that matches the problem's
+statistical nature — not just the one that historically scores lowest MAE.
+
+This is the ML concept of **Learning Using Privileged Information (LUPI)** combined
+with LLM domain reasoning across the full training pipeline.
+
+**Proposed domain model:**
+
+| Object | Owner | Description |
+|---|---|---|
+| `ProblemStatement` | User input | Natural language goal |
+| `SensorInventory` | User input | Training sensors vs inference sensors — the asymmetry |
+| `FeatureSpec` | LLM output | Structured feature definitions split into training-only and always-available |
+| `SupervisionSignal` | Part of `FeatureSpec` | Privileged features present only in training (e.g. presence sensor) |
+| `ModelSpec` | LLM output | Recommended model architecture + justification |
+| `PipelineSpec` | LLM output | Composite of `FeatureSpec` + `ModelSpec` — the full design |
+| `FeatureExtractor` | Python | Executes `FeatureSpec` deterministically, path-aware (training vs inference) |
+
+**Architecture:**
+
+```
+User provides:
+  ProblemStatement + SensorInventory (training ≠ inference)
+          │
+          ▼
+  LLM (domain reasoner)
+  - Understands physics (quantities.yaml as grounding)
+  - Identifies privileged signals (training-only)
+  - Designs proxy features bridging the gap          → FeatureSpec
+  - Selects model architecture for problem structure  → ModelSpec
+  - Explains reasoning for both decisions             → rationale
+          │
+          ▼
+  PipelineSpec (persisted YAML artifact, version-controlled)
+  ├── feature_spec:
+  │   ├── always_available: [voc_ratio, abs_humidity, dvoc_dt, ...]
+  │   ├── supervision_signals: [presence]        ← training only
+  │   ├── feature_formulas: {name: expression}   ← safe AST evaluated
+  │   └── rationale: {name: "physical reasoning"}
+  └── model_spec:
+      ├── recommended: bnn
+      ├── reasoning: "latent variable inference with calibrated uncertainty"
+      ├── alternatives: [lstm, mlp]
+      └── hyperparameter_hints: {prior_sigma: 0.5, kl_weight: 0.8}
+          │
+    ┌─────┴─────┐
+    │           │
+Training     Inference
+FeatureExtractor  FeatureExtractor
+(full set    (always_available
+ incl.        features only)
+ supervision
+ signals)
+```
+
+**Model selection reasoning examples:**
+
+| Problem structure | LLM recommendation | Why |
+|---|---|---|
+| Latent variable inference (presence detection) | BNN | Calibrated uncertainty over hidden state |
+| Strong temporal dynamics (slow VOC drift) | LSTM | Sequence memory across long windows |
+| Sharp local patterns (cooking spike) | CNN | Convolutional kernels detect local shape |
+| Simple regression, lots of data | MLP | Low inductive bias, fast, interpretable |
+| Novel sensor, small data, high uncertainty | BNN | Bayesian priors regularise under data scarcity |
+
+**Relationship to existing architecture:**
+
+- `SensorProfile` is retained but scoped to the **sensor contract** only:
+  raw feature names, valid ranges, physical units, quantities mapping.
+  It no longer owns `engineer_features()` — that moves to `FeatureExtractor`.
+- `PipelineSpec` sits above `SensorProfile` as the **reasoning layer**.
+- The safe AST evaluator in `app/quantities.py` executes LLM-generated
+  feature formulas without `eval()`.
+- The LLM backend (Ollama / Anthropic) reuses the same pluggable backend
+  pattern as the field mapper (`app/field_mapper.py`).
+- `PipelineSpec` is a versioned artifact stored alongside `model.pt` —
+  the schema fingerprint includes a `pipeline_spec_hash`.
+- The existing BNN (`app/models.py`) is already the correct architecture
+  for the motivating example — no new model type needed for first use case.
+
+**What changes to existing code when this is implemented:**
+
+- `SensorProfile` ABC: remove `engineer_features()`, `engineer_features_single()`,
+  `engineered_feature_names()` — replaced by `FeatureExtractor`
+- `training/pipeline.py` FEATURE_ENGINEERING stage: calls `FeatureExtractor`
+  instead of profile method
+- `training/train.py`: reads recommended model type from `ModelSpec` if not
+  explicitly overridden by `--model` CLI flag
+- `app/models.py` inference path: calls `FeatureExtractor` in inference mode
+- `model_config.yaml`: add `pipeline_spec_path` pointing to persisted spec
+- New CLI: `python -m iaq4j design-pipeline --problem "..." --training-sensors ... --inference-sensors ...`
+
+**Requirements:**
+
+- [ ] `ProblemStatement` + `SensorInventory` value objects (plain dataclasses)
+- [ ] `FeatureSpec` domain object: `always_available`, `supervision_signals`, `feature_formulas`, `rationale`
+- [ ] `ModelSpec` domain object: `recommended`, `reasoning`, `alternatives`, `hyperparameter_hints`
+- [ ] `PipelineSpec` composite: `FeatureSpec` + `ModelSpec`
+- [ ] `FeatureExtractor` Python class — executes `FeatureSpec` in training or inference mode
+- [ ] LLM prompt template: ProblemStatement + SensorInventory + quantities.yaml context → PipelineSpec
+- [ ] Safe formula evaluation wired to existing AST evaluator in `app/quantities.py`
+- [ ] `PipelineSpec` persisted as YAML alongside model artifacts
+- [ ] `pipeline_spec_hash` added to schema fingerprint
+- [ ] `SensorProfile` refactored — sensor contract only, engineering methods removed
+- [ ] CLI: `python -m iaq4j design-pipeline` command
+- [ ] Existing `BME680Profile` features ported to a reference `PipelineSpec` YAML as first example
+- [ ] `--model` CLI flag overrides LLM recommendation when explicitly provided
 
 ---
