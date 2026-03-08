@@ -14,7 +14,7 @@ above it are fully complete (all checkboxes ticked).
 | # | Item | Priority | Rationale |
 |---|---|---|---|
 | 1 | ~~**Temporal Feature Engineering**~~ ✅ | P0 | Retrain is already required (window_size change broke all artifacts). Fully implement staleness detection, SyntheticSource timestamps, and cyclical time features before retraining. Starting any other work on top of stale artifacts is wasteful. |
-| 2 | **Security Hardening** (HTTPS, rate limiting, headers) | P0 | Production gaps that exist right now. Cannot responsibly expose new endpoints from LLM Readiness without first hardening the surface. |
+| 2 | ~~**Security Hardening**~~ ✅ (HTTPS, rate limiting, headers) | P0 | Production gaps that exist right now. Cannot responsibly expose new endpoints from LLM Readiness without first hardening the surface. |
 | 3 | **MLflow Integration** (remaining work) | P1 | Completes observability. Required before LLM Readiness so that training runs are fully auditable when the agent starts triggering them. |
 | 4 | **LLM Readiness — Phase 1** (structured internals) | P1 | Plumbing prerequisite for all agent work: config cache, InfluxDB reads, typed exceptions, `APIError`. No user-facing changes. |
 | 5 | **LLM Readiness — Phase 2** (agent tool surface) | P1 | REST endpoints that expose all components to the agent. Depends on Phase 1. |
@@ -652,15 +652,20 @@ DELETE /sensors/{sensor_name}
 
 - [x] Docker port bound to localhost only (`127.0.0.1:8001:8000`) — external
   traffic must go through nginx
+- [x] HTTPS via Let's Encrypt / certbot on nginx for `enviro-sensors.uk` — `deploy/nginx-iaq4j.conf`
+- [x] API key authentication — `X-API-Key` header enforced on `/predict` and all mutation endpoints
+- [x] Rate limiting on nginx — `limit_req_zone` at 10 r/s, burst 20 in `deploy/nginx-iaq4j.conf`
+- [x] CORS tightened — explicit allowed origins (`enviro-sensors.uk`, `localhost`) in `app/main.py`
+- [x] Security headers — `Strict-Transport-Security`, `X-Content-Type-Options`, `X-Frame-Options`,
+  `X-XSS-Protection`, `Referrer-Policy`, `Permissions-Policy` in `deploy/nginx-iaq4j.conf`
+- [x] Read-only Docker filesystem — `read_only: true` with `tmpfs: /tmp:size=64m` in `docker-compose.yml`
+- [x] Deploy script uses `IAQ4J_SERVER` env var — no hardcoded production credentials in source
 
-**Requirements:**
+**Remaining (ops, not code):**
 
-- [ ] HTTPS via Let's Encrypt / certbot on nginx for `enviro-sensors.uk`
-- [ ] API key authentication — require `X-API-Key` header on `/predict` and mutation endpoints
-- [ ] Rate limiting on nginx (`limit_req_zone`) to prevent abuse
-- [ ] Tighten CORS — replace `allow_origins=["*"]` with explicit allowed origins
-- [ ] Add `X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security` headers in nginx
-- [ ] Read-only filesystem in Docker container (`read_only: true` with tmpfs for `/tmp`)
+- [ ] Run `certbot --nginx -d enviro-sensors.uk` on the production server to provision the TLS cert
+- [ ] Set `API_KEY` env var in production (generate with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`)
+- [ ] Restrict `/iaq/docs` and `/iaq/redoc` to localhost-only in nginx if public exposure is undesirable
 
 ---
 

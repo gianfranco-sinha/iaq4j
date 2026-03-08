@@ -36,9 +36,6 @@ app/config.env
 # TensorBoard logs
 runs/
 
-# Site specific info
-deploy/
-
 # ML artifacts
 trained_models/
 !trained_models/*/config.json
