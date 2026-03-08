@@ -10,6 +10,7 @@ services:
     environment:
       - ROOT_PATH=/iaq
       - API_KEY=${API_KEY:-}
+      - ENVIRONMENT=production
     ports:
       - "127.0.0.1:8001:8000"
     volumes:

@@ -11,7 +11,7 @@ influxdb:
   client_type: "influxdb"  # Options: "influxdb", "influxdb_client"
   
   # Connection settings
-  host: "87.106.102.14"
+  host: "localhost"
   port: 8086
   database: "iaq_predictions"
 

@@ -1,6 +1,7 @@
 import time
 import random
 import math
+from datetime import datetime, timezone
 import requests
 
 ENDPOINT = "http://localhost:8000/predict"
@@ -26,6 +27,7 @@ def generate_payload():
         rel_humidity = min(rel_humidity, random.uniform(50, 80))
 
     payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "temperature": temperature,
         "rel_humidity": rel_humidity,
         "pressure": round(random.uniform(985.0, 1035.0), 2),
