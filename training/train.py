@@ -19,6 +19,7 @@ def train_single_model(
     num_records: int = None,
     data_source: DataSource = None,
     experiment_name: str = "iaq4j",
+    resume: bool = False,
 ) -> PipelineResult:
     """Train a single model using the TrainingPipeline.
 
@@ -29,6 +30,7 @@ def train_single_model(
         num_records: Number of synthetic samples (ignored when data_source is provided).
         data_source: Data source to use. Defaults to SyntheticSource.
         experiment_name: MLflow experiment name.
+        resume: If True, resume from last checkpoint if available.
 
     Returns:
         PipelineResult on success.
@@ -59,9 +61,15 @@ def train_single_model(
             epochs=epochs,
             window_size=window_size,
             on_epoch=on_epoch,
+            resume=resume,
         )
 
         result = pipeline.orchestrate()
+
+        if result.interrupted:
+            logger.info("Training interrupted — checkpoint saved. MLflow run marked KILLED.")
+            mlflow.end_run(status="KILLED")
+            return result
 
         # Fix run name now that we have the semver (version is set during SAVING).
         # result.version already includes the model type prefix, e.g. "mlp-1.2.0"
@@ -86,12 +94,12 @@ def train_single_model(
 
         # Artifacts: scalers and data manifest alongside the pytorch model
         model_dir = Path(result.model_dir)
-        for name in ("feature_scaler.pkl", "target_scaler.pkl", "data_manifest.json"):
+        for name in ("feature_scaler.pkl", "target_scaler.pkl", "data_manifest.json", "data_cleanse_report.json"):
             path = model_dir / name
             if path.exists():
                 mlflow.log_artifact(str(path))
 
-        mlflow.pytorch.log_model(pipeline._model, "model")
+        mlflow.pytorch.log_model(pipeline._model, name="model")
 
         mlflow.end_run()
         return result

@@ -31,6 +31,7 @@ class ModelTrainer:
         window_size: int = None,
         num_records: int = None,
         data_source: DataSource = None,
+        resume: bool = False,
     ):
         """Train a specific model type."""
         if model_type not in ["mlp", "kan", "lstm", "cnn", "bnn"]:
@@ -44,6 +45,8 @@ class ModelTrainer:
         print(f"  - Window Size: {effective_window}")
         print(f"  - Data Source: {source_label}")
         print(f"  - Data Records: {num_records if num_records else 'All available'}")
+        if resume:
+            print(f"  - Resume: from checkpoint if available")
 
         result = train_single_model(
             model_type=model_type,
@@ -51,7 +54,12 @@ class ModelTrainer:
             window_size=window_size,
             num_records=num_records,
             data_source=data_source,
+            resume=resume,
         )
+
+        if result and result.interrupted:
+            print(f"\n⏸️  Training interrupted — checkpoint saved. Resume with --resume")
+            return result
 
         if result:
             model_path = f"trained_models/{model_type}"
@@ -64,11 +72,21 @@ class ModelTrainer:
                       f"R2={result.metrics['r2']:.4f}")
             print(f"   Model saved to: {model_path}/")
             print(f"   Timestamp: {datetime.now().isoformat()}")
+            # Print data cleanse report
+            report = result.preprocessing_report
+            if report.issues:
+                severity_prefix = {"error": "E", "warning": "W", "info": "I"}
+                print(f"\n   Data Cleanse Report ({len(report.issues)} issue(s)):")
+                for issue in report.issues:
+                    prefix = severity_prefix.get(issue.severity.value, "?")
+                    row_suffix = f" ({issue.rows_affected} rows)" if issue.rows_affected else ""
+                    print(f"     [{prefix}] {issue.message}{row_suffix}")
         else:
             raise RuntimeError(f"Training failed for {model_type.upper()} model")
 
     def train_all_models(
-        self, epochs: int = 200, window_size: int = None, num_records: int = None
+        self, epochs: int = 200, window_size: int = None, num_records: int = None,
+        resume: bool = False,
     ):
         """Train all models in registry."""
         models_to_train = ["mlp", "kan", "lstm", "cnn", "bnn"]
@@ -80,6 +98,7 @@ class ModelTrainer:
                     epochs=epochs,
                     window_size=window_size,
                     num_records=num_records,
+                    resume=resume,
                 )
             except RuntimeError as e:
                 print(f"❌ {e}")

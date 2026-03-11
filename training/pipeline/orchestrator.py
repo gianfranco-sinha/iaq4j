@@ -1,10 +1,8 @@
-"""FSM-based training pipeline that orchestrates the full training lifecycle."""
+"""TrainingPipeline — orchestrates the full training lifecycle via StageMachine."""
 
-import enum
 import json
 import logging
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -27,165 +25,25 @@ from training.utils import (
     get_device,
     patch_config_with_merkle_hash,
     patch_config_with_version,
+    patch_manifest_merkle,
     save_trained_model,
     seed_everything,
     train_model,
     update_central_manifest,
 )
-from training.merkle import (
-    build_sensor_node,
-    build_raw_data_node,
-    build_cleansed_data_node,
-    build_preprocessed_data_node,
-    build_split_data_node,
-    build_trained_model_node,
-    compute_scaler_hash,
-    compute_weights_hash,
+from training.merkle import build_merkle_tree_from_context
+from training.pipeline.types import (
+    ErrorCallback,
+    IssueSeverity,
+    PipelineResult,
+    PipelineState,
+    PreprocessingReport,
+    StageCallback,
+    StageResult,
 )
+from training.pipeline.fsm import StageMachine
 
 logger = logging.getLogger("training.pipeline")
-
-
-class PipelineState(enum.Enum):
-    IDLE = "idle"
-    SOURCE_ACCESS = "source_access"
-    INGESTION = "ingestion"
-    FEATURE_ENGINEERING = "feature_engineering"
-    WINDOWING = "windowing"
-    SCALING = "scaling"
-    SPLITTING = "splitting"
-    TRAINING = "training"
-    EVALUATION = "evaluation"
-    SAVING = "saving"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class IssueSeverity(enum.Enum):
-    INFO = "info"
-    WARNING = "warning"
-    ERROR = "error"
-
-
-@dataclass
-class Issue:
-    severity: IssueSeverity
-    stage: str
-    message: str
-    rows_affected: Optional[int] = None
-
-    def to_dict(self) -> dict:
-        d = {"severity": self.severity.value, "stage": self.stage, "message": self.message}
-        if self.rows_affected is not None:
-            d["rows_affected"] = self.rows_affected
-        return d
-
-
-@dataclass
-class PreprocessingReport:
-    issues: List[Issue] = field(default_factory=list)
-
-    def add(
-        self,
-        severity: IssueSeverity,
-        stage: str,
-        message: str,
-        rows_affected: int = None,
-    ):
-        self.issues.append(Issue(severity, stage, message, rows_affected))
-
-    @property
-    def errors(self) -> List[Issue]:
-        return [i for i in self.issues if i.severity == IssueSeverity.ERROR]
-
-    @property
-    def warnings(self) -> List[Issue]:
-        return [i for i in self.issues if i.severity == IssueSeverity.WARNING]
-
-    @property
-    def has_errors(self) -> bool:
-        return any(i.severity == IssueSeverity.ERROR for i in self.issues)
-
-    def to_dict(self) -> dict:
-        infos = [i for i in self.issues if i.severity == IssueSeverity.INFO]
-        return {
-            "issues": [i.to_dict() for i in self.issues],
-            "summary": {
-                "total": len(self.issues),
-                "errors": len(self.errors),
-                "warnings": len(self.warnings),
-                "infos": len(infos),
-            },
-        }
-
-    def log_summary(self):
-        if not self.issues:
-            logger.info("[preprocessing_report] No issues found")
-            return
-        errors = self.errors
-        warnings = self.warnings
-        infos = [i for i in self.issues if i.severity == IssueSeverity.INFO]
-        logger.info(
-            "[preprocessing_report] %d issue(s): %d error, %d warning, %d info",
-            len(self.issues),
-            len(errors),
-            len(warnings),
-            len(infos),
-        )
-        for issue in self.issues:
-            log_fn = {
-                IssueSeverity.ERROR: logger.error,
-                IssueSeverity.WARNING: logger.warning,
-                IssueSeverity.INFO: logger.info,
-            }[issue.severity]
-            msg = "[preprocessing_report] [%s] %s"
-            args = [issue.stage, issue.message]
-            if issue.rows_affected is not None:
-                msg += " (%d rows)"
-                args.append(issue.rows_affected)
-            log_fn(msg, *args)
-
-
-@dataclass
-class StageResult:
-    state: PipelineState
-    duration_seconds: float
-    rows_in: Optional[int] = None
-    rows_out: Optional[int] = None
-    columns: Optional[List[str]] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class FailureInfo:
-    failed_state: PipelineState
-    error: Exception
-    stage_results: List[StageResult]
-
-
-@dataclass
-class PipelineResult:
-    metrics: Dict[str, float]
-    training_history: Dict
-    model_dir: Path
-    stage_results: List[StageResult]
-    preprocessing_report: PreprocessingReport = field(
-        default_factory=PreprocessingReport
-    )
-    version: str = ""
-    merkle_root_hash: str = ""
-    artifact_paths: List[Path] = field(default_factory=list)
-    interrupted: bool = False
-
-
-class PipelineError(Exception):
-    def __init__(self, message: str, failure_info: FailureInfo):
-        super().__init__(message)
-        self.failure_info = failure_info
-
-
-StageCallback = Callable[[PipelineState, StageResult], None]
-ErrorCallback = Callable[[FailureInfo], None]
 
 
 class TrainingPipeline:
@@ -257,14 +115,7 @@ class TrainingPipeline:
         self._sensor_profile = get_sensor_profile()
         self._iaq_standard = get_iaq_standard()
 
-        self._state = PipelineState.IDLE
-        self._failure: Optional[FailureInfo] = None
-        self._stage_results: List[StageResult] = []
         self._report = PreprocessingReport()
-
-        self._on_stage_enter_callbacks: List[StageCallback] = []
-        self._on_stage_complete_callbacks: List[StageCallback] = []
-        self._on_error_callbacks: List[ErrorCallback] = []
         self._on_epoch_callback: Optional[Callable] = on_epoch
         self._resume = resume
 
@@ -298,13 +149,25 @@ class TrainingPipeline:
         self._device = None
         self._tb_log_dir = None
 
-    @property
-    def state(self) -> PipelineState:
-        return self._state
+        # Wire up the FSM
+        self._fsm = StageMachine()
+        self._fsm.add_stage(PipelineState.SOURCE_ACCESS, self._do_source_access)
+        self._fsm.add_stage(PipelineState.INGESTION, self._do_ingestion)
+        self._fsm.add_stage(PipelineState.FEATURE_ENGINEERING, self._do_feature_engineering)
+        self._fsm.add_stage(PipelineState.WINDOWING, self._do_windowing)
+        self._fsm.add_stage(PipelineState.SPLITTING, self._do_splitting)
+        self._fsm.add_stage(PipelineState.SCALING, self._do_scaling)
+        self._fsm.add_stage(PipelineState.TRAINING, self._do_training)
+        self._fsm.add_stage(PipelineState.EVALUATION, self._do_evaluation)
+        self._fsm.add_stage(PipelineState.SAVING, self._do_saving)
 
     @property
-    def failure(self) -> Optional[FailureInfo]:
-        return self._failure
+    def state(self) -> PipelineState:
+        return self._fsm.state or PipelineState.IDLE
+
+    @property
+    def failure(self):
+        return self._fsm.failure
 
     @staticmethod
     def _resolve_output_dir(output_dir: str = None) -> Path:
@@ -321,53 +184,16 @@ class TrainingPipeline:
         return target
 
     def on_stage_enter(self, callback: StageCallback) -> "TrainingPipeline":
-        self._on_stage_enter_callbacks.append(callback)
+        self._fsm.on_stage_enter(callback)
         return self
 
     def on_stage_complete(self, callback: StageCallback) -> "TrainingPipeline":
-        self._on_stage_complete_callbacks.append(callback)
+        self._fsm.on_stage_complete(callback)
         return self
 
     def on_error(self, callback: ErrorCallback) -> "TrainingPipeline":
-        self._on_error_callbacks.append(callback)
+        self._fsm.on_error(callback)
         return self
-
-    def _fire_enter(self, state: PipelineState) -> None:
-        self._state = state
-        logger.info("[%s] Starting...", state.value)
-        for cb in self._on_stage_enter_callbacks:
-            cb(state, None)
-
-    def _transition(self, new_state: PipelineState, result: StageResult) -> None:
-        msg = "[%s] Completed in %.2fs"
-        args: list = [new_state.value, result.duration_seconds]
-        if result.rows_out is not None:
-            msg += " (%d rows)"
-            args.append(result.rows_out)
-        logger.info(msg, *args)
-        logger.debug("[%s] extra=%s", new_state.value, result.extra)
-        self._stage_results.append(result)
-        for cb in self._on_stage_complete_callbacks:
-            cb(new_state, result)
-
-    def _fail(self, state: PipelineState, error: Exception) -> FailureInfo:
-        logger.error(
-            "[%s] FAILED: %s: %s",
-            state.value,
-            type(error).__name__,
-            error,
-            exc_info=True,
-        )
-        self._state = PipelineState.FAILED
-        info = FailureInfo(
-            failed_state=state,
-            error=error,
-            stage_results=list(self._stage_results),
-        )
-        self._failure = info
-        for cb in self._on_error_callbacks:
-            cb(info)
-        return info
 
     # ── Stage implementations ──────────────────────────────────────────
 
@@ -443,89 +269,6 @@ class TrainingPipeline:
                 )
                 self._df = self._df[~self._df.index.duplicated(keep="first")]
 
-            # ── Check: timezone consistency ─────────────────────────────
-            if self._df.index.tz is None:
-                self._df.index = self._df.index.tz_localize("UTC")
-                report.add(
-                    IssueSeverity.WARNING,
-                    "ingestion",
-                    "Timezone-naive timestamps — localized to UTC",
-                )
-            elif str(self._df.index.tz) != "UTC":
-                orig_tz = str(self._df.index.tz)
-                self._df.index = self._df.index.tz_convert("UTC")
-                report.add(
-                    IssueSeverity.INFO,
-                    "ingestion",
-                    f"Converted timestamps from {orig_tz} to UTC",
-                )
-
-            # ── Check: sampling interval consistency ────────────────────
-            if len(self._df) > 1:
-                deltas = np.diff(self._df.index.values).astype("timedelta64[ms]").astype(float) / 1000.0
-                median_interval = float(np.median(deltas))
-                expected = self._sensor_profile.expected_interval_seconds
-                if expected is not None and median_interval > 0:
-                    ratio = median_interval / expected
-                    if ratio > 5.0 or ratio < 0.2:
-                        report.add(
-                            IssueSeverity.WARNING,
-                            "ingestion",
-                            f"Median sampling interval {median_interval:.1f}s vs expected "
-                            f"{expected:.1f}s — possible duplicate or resampled data",
-                        )
-            else:
-                median_interval = 0.0
-
-        # ── Check: unit consistency ─────────────────────────────────────
-        from app.quantities import convert_to_canonical, get_quantity
-
-        feature_quantities = self._sensor_profile.feature_quantities
-        feature_units = self._sensor_profile.feature_units
-
-        for feat, qty_name in feature_quantities.items():
-            if feat not in self._df.columns:
-                continue
-
-            declared_unit = feature_units.get(feat)
-            qty = get_quantity(qty_name)
-
-            if declared_unit and declared_unit != qty.canonical_unit:
-                # Declared non-canonical unit — auto-convert
-                self._df[feat] = self._df[feat].apply(
-                    lambda v, u=declared_unit, q=qty_name: convert_to_canonical(v, u, q)
-                )
-                report.add(
-                    IssueSeverity.INFO,
-                    "ingestion",
-                    f"{feat}: converted from {declared_unit} to {qty.canonical_unit}",
-                )
-            elif not declared_unit and qty.valid_range:
-                # Heuristic: check if median falls within canonical range
-                col_median = float(self._df[feat].median())
-                lo, hi = qty.valid_range
-                if not (lo <= col_median <= hi):
-                    # Check alternate units — see if median fits after inverse mapping
-                    possible_units = []
-                    for alt_name, alt in qty.alternate_units.items():
-                        try:
-                            # Treat col_median as if it's in alt_name units;
-                            # if converting to canonical puts it in valid range,
-                            # the data is likely in that alternate unit.
-                            canonical_val = convert_to_canonical(col_median, alt_name, qty_name)
-                            if lo <= canonical_val <= hi:
-                                possible_units.append(alt_name)
-                        except (ValueError, ZeroDivisionError):
-                            continue
-                    if possible_units:
-                        report.add(
-                            IssueSeverity.WARNING,
-                            "ingestion",
-                            f"{feat}: median {col_median:.1f} outside canonical range "
-                            f"[{lo}, {hi}] {qty.canonical_unit} — possible unit mismatch "
-                            f"(looks like {possible_units[0]})?",
-                        )
-
         # ── Check: NaN values in data columns ─────────────────────────
         nan_rows = int(self._df.isna().any(axis=1).sum())
         if nan_rows > 0:
@@ -583,8 +326,6 @@ class TrainingPipeline:
         if has_timestamps and n_clean > 0:
             extra["date_range_start"] = str(self._df.index.min())
             extra["date_range_end"] = str(self._df.index.max())
-            if median_interval > 0:
-                extra["median_interval_seconds"] = median_interval
 
         return StageResult(
             state=PipelineState.INGESTION,
@@ -1007,12 +748,48 @@ class TrainingPipeline:
         manifest["version"] = self._version
 
         # Build Merkle provenance tree
-        self._merkle_root = self._build_merkle_tree(schema_fp, self._version)
+        self._merkle_root = build_merkle_tree_from_context(
+            sensor_id=identity.get("sensor_id"),
+            firmware_version=identity.get("firmware_version"),
+            sensor_type=self._sensor_profile.name,
+            source_metadata=self._source.metadata,
+            raw_row_count=self._raw_row_count or 0,
+            clean_row_count=len(self._df),
+            data_fingerprint=self._data_fingerprint or "",
+            rows_dropped=(self._raw_row_count or 0) - len(self._df),
+            issues_summary=(
+                "; ".join(f"[{i.severity.value}] {i.message}" for i in self._report.issues)
+                if self._report.issues
+                else "none"
+            ),
+            schema_fingerprint=schema_fp,
+            feature_stats=self._feature_stats or {},
+            baselines=self._baselines,
+            feature_scaler=self._feature_scaler,
+            target_scaler=self._target_scaler,
+            window_size=self._window_size,
+            num_features=self._sensor_profile.total_features,
+            sample_count=len(self._X),
+            test_size=self._test_size,
+            train_samples=len(self._X_train),
+            val_samples=len(self._X_val),
+            model_state_dict=self._model.state_dict(),
+            metrics=self._metrics,
+            training_config={
+                "epochs": self._epochs,
+                "learning_rate": self._learning_rate,
+                "batch_size": self._batch_size,
+            },
+            model_type=self._model_type,
+            version=self._version,
+        )
         manifest["merkle_tree"] = self._merkle_root.to_dict()
         manifest["merkle_root_hash"] = self._merkle_root.content_hash
 
         # Patch central MANIFEST.json with merkle_root_hash
-        self._patch_central_manifest_merkle(self._merkle_root.content_hash)
+        patch_manifest_merkle(
+            self._model_type, self._version, self._merkle_root.content_hash
+        )
 
         # Patch config.json with version + schema fingerprint (Option B)
         patch_config_with_version(self._model_dir, self._version, schema_fp)
@@ -1049,101 +826,6 @@ class TrainingPipeline:
                 "artifacts": [f.name for f in self._artifact_paths],
             },
         )
-
-    def _patch_central_manifest_merkle(self, merkle_root_hash: str) -> None:
-        """Patch the active run in MANIFEST.json with merkle_root_hash."""
-        import json
-
-        manifest_path = Path(settings.TRAINED_MODELS_BASE) / "MANIFEST.json"
-        if not manifest_path.exists():
-            return
-        with open(manifest_path) as f:
-            central = json.load(f)
-        for run in central.get("runs", []):
-            if (
-                run.get("model_type") == self._model_type
-                and run.get("is_active")
-                and run.get("version") == self._version
-            ):
-                run["merkle_root_hash"] = merkle_root_hash
-        with open(manifest_path, "w") as f:
-            json.dump(central, f, indent=2, default=str)
-
-    def _build_merkle_tree(self, schema_fingerprint: str, version: str):
-        """Build the 6-level Merkle tree from pipeline state."""
-        identity = settings.get_sensor_identity()
-
-        # Level 1: Sensor (leaf)
-        sensor_node = build_sensor_node(
-            sensor_id=identity.get("sensor_id"),
-            firmware_version=identity.get("firmware_version"),
-            sensor_type=self._sensor_profile.name,
-        )
-
-        # Level 2: RawData
-        raw_data_node = build_raw_data_node(
-            sensor_node=sensor_node,
-            source_metadata=self._source.metadata,
-            raw_row_count=self._raw_row_count or 0,
-        )
-
-        # Level 3: CleansedData
-        rows_dropped = (self._raw_row_count or 0) - len(self._df)
-        issues_summary = (
-            "; ".join(f"[{i.severity.value}] {i.message}" for i in self._report.issues)
-            if self._report.issues
-            else "none"
-        )
-
-        cleansed_data_node = build_cleansed_data_node(
-            raw_data_nodes=raw_data_node,
-            data_fingerprint=self._data_fingerprint or "",
-            clean_row_count=len(self._df),
-            rows_dropped=rows_dropped,
-            issues_summary=issues_summary,
-        )
-
-        # Level 4: PreprocessedData
-        scaler_hash = compute_scaler_hash(self._feature_scaler, self._target_scaler)
-
-        preprocessed_data_node = build_preprocessed_data_node(
-            cleansed_data_node=cleansed_data_node,
-            schema_fingerprint=schema_fingerprint,
-            feature_stats=self._feature_stats or {},
-            baselines=self._baselines,
-            scaler_hash=scaler_hash,
-            window_size=self._window_size,
-            num_features=self._sensor_profile.total_features,
-            sample_count=len(self._X),
-        )
-
-        # Level 5: SplitData
-        split_data_node = build_split_data_node(
-            preprocessed_data_node=preprocessed_data_node,
-            test_size=self._test_size,
-            train_samples=len(self._X_train),
-            val_samples=len(self._X_val),
-        )
-
-        # Level 6: TrainedModel (root)
-        weights_hash = compute_weights_hash(self._model.state_dict())
-        training_config = {
-            "epochs": self._epochs,
-            "learning_rate": self._learning_rate,
-            "batch_size": self._batch_size,
-        }
-
-        root = build_trained_model_node(
-            split_data_node=split_data_node,
-            weights_hash=weights_hash,
-            metrics=self._metrics,
-            training_config=training_config,
-            model_type=self._model_type,
-            version=version,
-        )
-
-        root.compute_hash()
-        return root
 
     def collect_run_params(self) -> Dict[str, Any]:
         """Flat dict of all run parameters — ready for mlflow.log_params().
@@ -1188,7 +870,7 @@ class TrainingPipeline:
 
         # Serialize stage results
         stages = []
-        for sr in self._stage_results:
+        for sr in self._fsm.stage_results:
             stages.append(
                 {
                     "stage": sr.state.value,
@@ -1233,45 +915,25 @@ class TrainingPipeline:
 
     def orchestrate(self) -> PipelineResult:
         """Run the full pipeline from IDLE to COMPLETED."""
-        stages = [
-            (PipelineState.SOURCE_ACCESS, self._do_source_access),
-            (PipelineState.INGESTION, self._do_ingestion),
-            (PipelineState.FEATURE_ENGINEERING, self._do_feature_engineering),
-            (PipelineState.WINDOWING, self._do_windowing),
-            (PipelineState.SPLITTING, self._do_splitting),
-            (PipelineState.SCALING, self._do_scaling),
-            (PipelineState.TRAINING, self._do_training),
-            (PipelineState.EVALUATION, self._do_evaluation),
-            (PipelineState.SAVING, self._do_saving),
-        ]
 
-        preprocessing_end = PipelineState.SCALING
-
-        for state, stage_fn in stages:
-            self._fire_enter(state)
-            try:
-                result = stage_fn()
-                self._transition(state, result)
-            except Exception as e:
-                info = self._fail(state, e)
-                raise PipelineError(
-                    f"Pipeline failed at {state.value}: {type(e).__name__}: {e}",
-                    failure_info=info,
-                ) from e
-
-            if state == preprocessing_end:
+        def _after_stage(state, result):
+            # Log preprocessing report after SCALING stage
+            if state == PipelineState.SCALING:
                 self._report.log_summary()
 
-            # If training was interrupted, skip EVALUATION and SAVING
-            if state == PipelineState.TRAINING and self._training_interrupted:
-                logger.info(
-                    "Training interrupted after %d epochs — skipping evaluation and saving",
-                    len(self._training_history["train_losses"]),
-                )
-                self._state = PipelineState.COMPLETED
-                return self._build_result(interrupted=True)
+        self._fsm.run(
+            interrupted=lambda: self._training_interrupted,
+            after_stage=_after_stage,
+        )
 
-        self._state = PipelineState.COMPLETED
+        # If training was interrupted, log and return partial result
+        if self._training_interrupted:
+            logger.info(
+                "Training interrupted after %d epochs — skipping evaluation and saving",
+                len(self._training_history["train_losses"]),
+            )
+            return self._build_result(interrupted=True)
+
         return self._build_result()
 
     def _build_result(self, interrupted: bool = False) -> PipelineResult:
@@ -1279,7 +941,7 @@ class TrainingPipeline:
             metrics=self._metrics or {},
             training_history=self._training_history,
             model_dir=self._model_dir,
-            stage_results=list(self._stage_results),
+            stage_results=self._fsm.stage_results,
             preprocessing_report=self._report,
             version=self._version,
             merkle_root_hash=self._merkle_root.content_hash
