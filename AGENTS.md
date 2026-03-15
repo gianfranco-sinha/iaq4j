@@ -28,11 +28,11 @@ python -m iaq4j version
 python -m iaq4j verify [--model mlp]
 ```
 
-### Testing (pytest — 266+ tests)
+### Testing (pytest — 358+ tests)
 ```bash
 python -m pytest                          # all tests
 python -m pytest tests/unit/              # unit tests only
-python -m pytest tests/integration/      # integration tests
+python -m pytest tests/integration/       # integration tests
 python -m pytest tests/unit/test_models.py -v             # single file
 python -m pytest tests/unit/test_models.py::TestBuildModel -v           # single class
 python -m pytest tests/unit/test_models.py::TestBuildModel::test_build_mlp -v  # single test

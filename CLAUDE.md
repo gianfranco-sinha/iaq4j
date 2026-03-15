@@ -40,8 +40,10 @@ tensorboard --logdir runs/
 # MLflow experiment tracking UI
 mlflow ui --port 5000
 
-# Tests (pytest — 266+ tests, Tier 1 + Tier 2)
+# Tests (pytest — 358+ tests, Tier 1 + Tier 2 + Tier 3 + property-based)
 python -m pytest                                          # all tests
+python -m pytest tests/unit/                               # unit tests only
+python -m pytest tests/integration/                        # integration tests
 python -m pytest tests/unit/test_models.py -v             # single file
 python -m pytest tests/unit/test_models.py::TestBuildModel -v             # single class
 python -m pytest tests/unit/test_models.py::TestBuildModel::test_build_mlp -v  # single test
@@ -53,7 +55,9 @@ mypy app/
 black app/ training/
 ```
 
-**Test structure**: `tests/unit/` (10 files) + `tests/integration/test_pipeline.py`. Config: `pytest.ini` (testpaths=tests, pythonpath=.). Key fixtures in `tests/conftest.py`: `bme680_profile`, `bsec_standard`, `sample_raw_data`, `sample_reading`, `sample_timestamps`, `patched_models_base`, `model_artifact_dir`, `fast_pipeline_kwargs`.
+**Test structure**: `tests/unit/` (15+ files) + `tests/integration/test_pipeline.py`. Config: `pytest.ini` (testpaths=tests, pythonpath=.). Key fixtures in `tests/conftest.py`: `bme680_profile`, `bsec_standard`, `sample_raw_data`, `sample_reading`, `sample_timestamps`, `patched_models_base`, `model_artifact_dir`, `fast_pipeline_kwargs`.
+
+**New test modules**: drift correction, LLM readiness, property-based (Hypothesis), sensor drift reports, IAQ standards.
 
 ## Architecture
 
@@ -71,7 +75,9 @@ Both paths save artifacts to `trained_models/{model_type}/` (model.pt, config.js
 
 **Inference engine** (`app/inference.py`): `InferenceEngine` wraps `IAQPredictor`. Flow: `SensorReading` → `InferenceEngine` → `IAQPredictor.predict()` → profile feature engineering → scaler transform → torch forward pass → standard clamp/categorize → `IAQResponse`. Uncertainty via MC dropout (MLP/LSTM/CNN), weight sampling (BNN), or history-based fallback (KAN). Supports Bayesian conjugate updates via `prior_variables` (external environmental signals that shift the posterior) and per-engine prediction history for running statistics and sensor drift analysis.
 
-**Sensor & standard abstractions** (`app/profiles.py`): `SensorProfile` ABC defines raw features, valid ranges, and feature engineering. `IAQStandard` ABC defines target scale and category breakpoints. Built-in implementations in `app/builtin_profiles.py` (BME680 + BSEC). Selected via `sensor.type` and `iaq_standard.type` in `model_config.yaml`. Registries populated via `import app.builtin_profiles` side effect.
+**Sensor & standard abstractions** (`app/profiles.py`): `SensorProfile` ABC defines raw features, valid ranges, and feature engineering. `IAQStandard` ABC defines target scale and category breakpoints. Built-in implementations in `app/builtin_profiles.py` (BME680 + BSEC). IAQ standards in `app/standards.py` (BSEC, EPA AQI). Selected via `sensor.type` and `iaq_standard.type` in `model_config.yaml`. Registries populated via `import app.builtin_profiles` side effect.
+
+**Drift analysis** (`training/drift_analysis.py`, `training/drift_correction.py`): Detects and corrects sensor drift over time. Compares recent predictions against ground truth, identifies systematic bias, applies correction factors.
 
 **Physical quantity registry** (`quantities.yaml` + `app/quantities.py`): Central YAML table of all known physical quantities (temperature, humidity, VOC resistance, CO2, etc.) with canonical units, valid ranges, and alternate unit conversion expressions. `app/quantities.py` loads it lazily, exposes `get_quantity()`, `convert_to_canonical()`, and `list_quantities()`. Unit conversion expressions use a safe AST-based evaluator (no `eval()`). `SensorProfile.feature_quantities` maps profile feature names to quantity names in this table.
 
@@ -137,4 +143,4 @@ See `docs/roadmap.md` for full details and canonical implementation order. Next 
 - **P2: MLflow Integration** — demoted; basic integration live in `training/train.py`, remaining work adds callbacks to final pipeline shape
 - **P2: LLM-Driven Pipeline Design** — capstone
 
-Completed: physical quantity registry, semantic field mapping, artifact semver, sensor registration API, LabelStudio data source, temporal feature engineering, security hardening, pytest Tier 1+2, training checkpoint & resume, DAG Merkle tree.
+Completed: physical quantity registry, semantic field mapping, artifact semver, sensor registration API, LabelStudio data source, temporal feature engineering, security hardening, pytest Tier 1+2+3 (358 tests), property-based testing, training checkpoint & resume, DAG Merkle tree, IAQ standards abstraction (BSEC, EPA AQI), sensor drift analysis & correction.
