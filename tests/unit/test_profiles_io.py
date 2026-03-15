@@ -2,7 +2,7 @@
 import pytest
 
 import app.builtin_profiles  # noqa: F401
-from app.builtin_profiles import BME680Profile, BSECStandard
+from app.builtin_profiles import BME680Profile
 from app.config import settings
 from app.profiles import get_iaq_standard, get_sensor_profile
 
@@ -47,7 +47,7 @@ class TestGetIAQStandard:
             "iaq_standard": {"type": "bsec"}
         })
         standard = get_iaq_standard()
-        assert isinstance(standard, BSECStandard)
+        assert standard.name == "bsec"
         monkeypatch.setattr(settings, "_model_config_cache", None)
 
     def test_unknown_raises(self, monkeypatch):
@@ -62,7 +62,7 @@ class TestGetIAQStandard:
         """Returns BSECStandard when 'iaq_standard' key absent."""
         monkeypatch.setattr(settings, "_model_config_cache", {})
         standard = get_iaq_standard()
-        assert isinstance(standard, BSECStandard)
+        assert standard.name == "bsec"
         monkeypatch.setattr(settings, "_model_config_cache", None)
 
     def test_missing_type_key_defaults(self, monkeypatch):
@@ -71,5 +71,5 @@ class TestGetIAQStandard:
             "iaq_standard": {"scale": "custom"}
         })
         standard = get_iaq_standard()
-        assert isinstance(standard, BSECStandard)
+        assert standard.name == "bsec"
         monkeypatch.setattr(settings, "_model_config_cache", None)

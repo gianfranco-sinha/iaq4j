@@ -71,9 +71,14 @@ class BNNRegressor(nn.Module):
 
     Same architecture as MLPRegressor but with BayesianLinear layers instead
     of nn.Linear.  No Dropout — uncertainty comes from weight sampling.
+
+    BatchNorm is disabled by default because it suppresses the weight
+    uncertainty signal that BayesianLinear layers produce, making the KL
+    penalty ineffective as a regularizer.
     """
 
-    def __init__(self, input_dim, hidden_dims=None, prior_sigma=1.0):
+    def __init__(self, input_dim, hidden_dims=None, prior_sigma=1.0,
+                 use_batch_norm=False):
         super().__init__()
         if hidden_dims is None:
             hidden_dims = [64, 32, 16]
@@ -84,7 +89,8 @@ class BNNRegressor(nn.Module):
 
         for hidden_dim in hidden_dims:
             layers.append(BayesianLinear(prev_dim, hidden_dim, prior_sigma))
-            layers.append(nn.BatchNorm1d(hidden_dim))
+            if use_batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_dim))
             layers.append(nn.ReLU())
             prev_dim = hidden_dim
 
@@ -179,6 +185,11 @@ class CNNRegressor(nn.Module):
     def forward(self, x):
         # Reshape from (batch, window_size * num_features) to (batch, num_features, window_size)
         batch_size = x.shape[0]
+        expected_flat = self.window_size * self.num_features
+        assert x.shape[-1] == expected_flat, (
+            f"CNN input dim mismatch: expected {expected_flat} "
+            f"(window={self.window_size} * features={self.num_features}), got {x.shape[-1]}"
+        )
         x = x.view(batch_size, self.window_size, self.num_features)
         x = x.permute(0, 2, 1)  # (batch, num_features, window_size)
 
@@ -241,6 +252,11 @@ class LSTMRegressor(nn.Module):
     def forward(self, x):
         # Reshape from (batch, window_size * num_features) to (batch, window_size, num_features)
         batch_size = x.shape[0]
+        expected_flat = self.window_size * self.num_features
+        assert x.shape[-1] == expected_flat, (
+            f"LSTM input dim mismatch: expected {expected_flat} "
+            f"(window={self.window_size} * features={self.num_features}), got {x.shape[-1]}"
+        )
         x = x.view(batch_size, self.window_size, self.num_features)
 
         # LSTM forward pass
@@ -264,13 +280,17 @@ class LSTMRegressor(nn.Module):
 class KANRegressor(nn.Module):
     """KAN for IAQ prediction."""
 
-    def __init__(self, input_dim, hidden_dims=[32, 16]):
+    def __init__(self, input_dim, hidden_dims=[32, 16], grid_size=5,
+                 spline_order=3):
         super(KANRegressor, self).__init__()
         layers = [input_dim] + hidden_dims + [1]
-        self.kan = KAN(layers)
+        self.kan = KAN(layers, grid_size=grid_size, spline_order=spline_order)
 
     def forward(self, x):
         return self.kan(x)
+
+    def regularization_loss(self):
+        return self.kan.regularization_loss()
 
 
 MODEL_REGISTRY = {
@@ -314,6 +334,8 @@ def build_model(model_type: str, window_size: int = 10, num_features: int = 6) -
         return ModelCls(
             input_dim=effective_window * effective_features,
             hidden_dims=cfg.get("hidden_dims", [32, 16]),
+            grid_size=cfg.get("grid_size", 5),
+            spline_order=cfg.get("spline_order", 3),
         )
     elif model_type == "lstm":
         return ModelCls(
@@ -337,6 +359,7 @@ def build_model(model_type: str, window_size: int = 10, num_features: int = 6) -
             input_dim=effective_window * effective_features,
             hidden_dims=cfg.get("hidden_dims", [64, 32, 16]),
             prior_sigma=cfg.get("prior_sigma", 1.0),
+            use_batch_norm=cfg.get("use_batch_norm", False),
         )
 
     return ModelCls(**cfg)
@@ -461,12 +484,14 @@ class IAQPredictor:
             saved_fp = self.config.get("schema_fingerprint")
             if saved_fp:
                 from training.utils import compute_schema_fingerprint
+                current_feature_names = self.sensor_profile.all_feature_names
                 current_fp = compute_schema_fingerprint(
                     sensor_type=self.sensor_profile.name,
                     iaq_standard=self.iaq_standard.name,
                     window_size=self.window_size,
                     num_features=num_features,
                     model_type=self.model_type,
+                    feature_names=current_feature_names,
                 )
                 if current_fp != saved_fp:
                     logger.warning(
@@ -476,6 +501,19 @@ class IAQPredictor:
                         "(sensor_type, iaq_standard, window_size, or num_features "
                         "may have changed). Predictions may be unreliable.",
                         self.model_type, saved_fp, current_fp,
+                    )
+
+            # Feature name integrity check
+            saved_names = self.config.get("feature_names")
+            if saved_names is not None:
+                current_names = self.sensor_profile.all_feature_names
+                if saved_names != current_names:
+                    logger.warning(
+                        "Feature name mismatch for %s: "
+                        "saved=%s, current=%s. "
+                        "The sensor profile's feature names or ordering have changed "
+                        "since training. Predictions may be unreliable.",
+                        self.model_type, saved_names, current_names,
                     )
 
             # Merkle root hash cross-check (config.json vs data_manifest.json)

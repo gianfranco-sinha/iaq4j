@@ -9,11 +9,10 @@ import numpy as np
 import pandas as pd
 
 from app.profiles import (
-    IAQStandard,
     SensorProfile,
     register_sensor,
-    register_standard,
 )
+from app.standards import register_yaml_standards
 
 
 class BME680Profile(SensorProfile):
@@ -49,6 +48,10 @@ class BME680Profile(SensorProfile):
     @property
     def quality_min(self) -> Optional[float]:
         return 2
+
+    @property
+    def expected_interval_seconds(self) -> Optional[float]:
+        return 3.0  # BME680 LP mode
 
     @property
     def engineered_feature_names(self) -> List[str]:
@@ -132,32 +135,6 @@ class BME680Profile(SensorProfile):
                                     dow_sin[0], dow_cos[0]])
 
 
-class BSECStandard(IAQStandard):
-    """Bosch BSEC IAQ index — 0-500 scale with 5 categories."""
-
-    @property
-    def name(self) -> str:
-        return "bsec"
-
-    @property
-    def target_column(self) -> str:
-        return "iaq"
-
-    @property
-    def scale_range(self) -> Tuple[float, float]:
-        return (0.0, 500.0)
-
-    @property
-    def categories(self) -> List[Tuple[float, str]]:
-        return [
-            (50, "Excellent"),
-            (100, "Good"),
-            (200, "Moderate"),
-            (300, "Poor"),
-            (float("inf"), "Very Poor"),
-        ]
-
-
 class SPS30Profile(SensorProfile):
     """Sensirion SPS30 particulate matter sensor."""
 
@@ -213,37 +190,9 @@ class SPS30Profile(SensorProfile):
         return np.array(raw_vals + [pm25_pm10_ratio, pm1_pm25_ratio])
 
 
-class EPAAQIStandard(IAQStandard):
-    """US EPA Air Quality Index — 0-500 scale with 6 categories."""
-
-    @property
-    def name(self) -> str:
-        return "epa_aqi"
-
-    @property
-    def target_column(self) -> str:
-        return "aqi"
-
-    @property
-    def scale_range(self) -> Tuple[float, float]:
-        return (0.0, 500.0)
-
-    @property
-    def categories(self) -> List[Tuple[float, str]]:
-        return [
-            (50, "Good"),
-            (100, "Moderate"),
-            (150, "Unhealthy for Sensitive Groups"),
-            (200, "Unhealthy"),
-            (300, "Very Unhealthy"),
-            (float("inf"), "Hazardous"),
-        ]
-
-
 # ---------------------------------------------------------------------------
-# Register built-in profiles
+# Register built-in profiles and YAML-driven standards
 # ---------------------------------------------------------------------------
 register_sensor("bme680", BME680Profile)
 register_sensor("sps30", SPS30Profile)
-register_standard("bsec", BSECStandard)
-register_standard("epa_aqi", EPAAQIStandard)
+register_yaml_standards()

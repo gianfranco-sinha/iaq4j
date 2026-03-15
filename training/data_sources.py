@@ -570,55 +570,138 @@ class SyntheticSource(DataSource):
         """No-op — synthetic data is always available."""
         logger.info("Validating %s", self.name)
 
+    # BME680 features that have physics-based generation
+    _PHYSICS_FEATURES = {"temperature", "rel_humidity", "pressure", "voc_resistance"}
+
     def fetch(self) -> pd.DataFrame:
-        """Generate synthetic sensor data matching the active sensor profile."""
+        """Generate synthetic sensor data with physics-based correlations.
+
+        Uses a three-layer generative model:
+        1. Temporal backbone — dual-peak occupancy signal drives VOC emissions
+        2. Correlated environmental features with AR(1) autocorrelation
+        3. IAQ target from physics-inspired transfer function
+
+        Features not in the physics model fall back to uniform random.
+        """
         from app.profiles import get_iaq_standard, get_sensor_profile
 
         profile = get_sensor_profile()
         standard = get_iaq_standard()
         rng = np.random.default_rng(self.seed)
+        n = self.num_samples
+
+        # ── DatetimeIndex: evenly-spaced across one week ──────────────────
+        week_start = pd.Timestamp("2024-01-01 00:00:00", tz="UTC")
+        week_seconds = 7 * 24 * 3600
+        interval_seconds = max(1, week_seconds // n)
+        index = pd.date_range(
+            start=week_start, periods=n, freq=f"{interval_seconds}s", tz="UTC"
+        )
+
+        hours = np.array([ts.hour + ts.minute / 60 for ts in index])
+        dow = np.array([ts.dayofweek for ts in index])  # 0=Mon, 6=Sun
+
+        # ── Layer 1: Occupancy signal ─────────────────────────────────────
+        # Dual Gaussian peaks: morning ~9am, evening ~7pm, trough at ~3am
+        occ_morning = np.exp(-0.5 * ((hours - 9) / 2.5) ** 2)
+        occ_evening = np.exp(-0.5 * ((hours - 19) / 2.0) ** 2)
+        occupancy = 0.6 * occ_morning + occ_evening
+        # Weekend dampening
+        weekend_mask = (dow >= 5).astype(float)
+        occupancy *= 1.0 - 0.4 * weekend_mask
+        # Normalize to [0, 1]
+        occupancy = occupancy / (occupancy.max() + 1e-8)
+
+        # ── Helper: AR(1) smooth drift ────────────────────────────────────
+        def ar1_drift(decay: float, scale: float) -> np.ndarray:
+            """Generate AR(1) process: x[t] = decay * x[t-1] + noise."""
+            noise = rng.normal(0, scale, n)
+            drift = np.empty(n)
+            drift[0] = noise[0]
+            for i in range(1, n):
+                drift[i] = decay * drift[i - 1] + noise[i]
+            return drift
 
         data = {}
-        for feat in profile.raw_features:
-            lo, hi = profile.valid_ranges.get(feat, (0, 1))
-            # Use a comfortable sub-range to avoid edge effects
-            margin = (hi - lo) * 0.1
-            data[feat] = rng.uniform(lo + margin, hi - margin, self.num_samples)
 
-        # Target: uniform across standard's scale range with noise
+        # ── Layer 2: Correlated environmental features ────────────────────
+        has_physics = self._PHYSICS_FEATURES.issubset(set(profile.raw_features))
+
+        if has_physics:
+            # Temperature: 22°C base + diurnal swing (peak ~2pm) + slow drift
+            diurnal_temp = 2.0 * np.sin(2 * np.pi * (hours - 8) / 24)
+            temp_drift = ar1_drift(decay=0.995, scale=0.05)
+            temperature = 22.0 + diurnal_temp + temp_drift
+            temperature = np.clip(temperature, 18.0, 30.0)
+            data["temperature"] = temperature
+
+            # Humidity: 50% base, anti-correlated with temperature + drift
+            humidity = 50.0 - 0.8 * (temperature - 22.0) + ar1_drift(0.995, 0.08)
+            humidity = np.clip(humidity, 30.0, 70.0)
+            data["rel_humidity"] = humidity
+
+            # Pressure: 1013 hPa base + very slow weather drift
+            pressure = 1013.0 + ar1_drift(decay=0.999, scale=0.02)
+            pressure = np.clip(pressure, 995.0, 1030.0)
+            data["pressure"] = pressure
+
+            # VOC resistance: log-space, clean air ~200k, degraded by occupancy
+            log_voc_clean = np.log(200_000)
+            # Occupancy degrades VOC (lower resistance), temperature slightly too
+            log_voc = (
+                log_voc_clean
+                - 2.5 * occupancy  # occupancy drives pollution
+                - 0.05 * (temperature - 22.0)  # warm air slightly degrades
+                + ar1_drift(0.99, 0.03)  # sensor noise
+            )
+            voc_resistance = np.exp(log_voc)
+            voc_resistance = np.clip(voc_resistance, 5_000, 1_500_000)
+            data["voc_resistance"] = voc_resistance
+        else:
+            voc_resistance = None
+
+        # Fallback: any feature not in the physics model gets uniform random
+        for feat in profile.raw_features:
+            if feat not in data:
+                lo, hi = profile.valid_ranges.get(feat, (0, 1))
+                margin = (hi - lo) * 0.1
+                data[feat] = rng.uniform(lo + margin, hi - margin, n)
+
+        # ── Layer 3: IAQ from physics-inspired transfer function ──────────
         scale_lo, scale_hi = standard.scale_range
-        data[standard.target_column] = np.clip(
-            rng.uniform(scale_lo, scale_hi, self.num_samples)
-            + rng.normal(0, (scale_hi - scale_lo) * 0.02, self.num_samples),
-            scale_lo,
-            scale_hi,
-        )
+        if has_physics:
+            # IAQ = f(voc_resistance, humidity)
+            iaq = (
+                25.0
+                + 120.0 * (np.log(200_000) - np.log(voc_resistance))
+            )
+            # Humidity penalty: discomfort at extremes
+            iaq += np.where(humidity > 60, 0.5 * (humidity - 60), 0.0)
+            iaq += np.where(humidity < 35, 0.3 * (35 - humidity), 0.0)
+            # Measurement noise
+            iaq += rng.normal(0, 8.0, n)
+            iaq = np.clip(iaq, scale_lo, scale_hi)
+        else:
+            # No physics model — uniform target (same as old behavior)
+            iaq = np.clip(
+                rng.uniform(scale_lo, scale_hi, n)
+                + rng.normal(0, (scale_hi - scale_lo) * 0.02, n),
+                scale_lo,
+                scale_hi,
+            )
+        data[standard.target_column] = iaq
 
         # Quality column if the sensor profile defines one
         if profile.quality_column and profile.quality_min is not None:
-            data[profile.quality_column] = np.full(
-                self.num_samples, profile.quality_min
-            )
-
-        # Build a DatetimeIndex spread across a full week so temporal features
-        # (hour_sin/cos, dow_sin/cos) have realistic variety during training.
-        # Timestamps are random within the week and sorted chronologically to
-        # preserve the pipeline's required monotonic ordering.
-        week_start = pd.Timestamp("2024-01-01 00:00:00", tz="UTC")
-        week_end = pd.Timestamp("2024-01-08 00:00:00", tz="UTC")
-        random_seconds = rng.integers(
-            int(week_start.timestamp()),
-            int(week_end.timestamp()),
-            size=self.num_samples,
-        )
-        index = pd.to_datetime(np.sort(random_seconds), unit="s", utc=True)
+            data[profile.quality_column] = np.full(n, profile.quality_min)
 
         df = pd.DataFrame(data, index=index)
         logger.info(
-            "Generated %d synthetic samples (seed=%d) with DatetimeIndex "
-            "spanning %s to %s",
-            self.num_samples,
+            "Generated %d synthetic samples (seed=%d, physics=%s) with "
+            "DatetimeIndex spanning %s to %s",
+            n,
             self.seed,
+            has_physics,
             index[0],
             index[-1],
         )

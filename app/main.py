@@ -1,8 +1,9 @@
 # ============================================================================
 # File: app/main.py
 # ============================================================================
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import logging
 import os
@@ -24,6 +25,8 @@ from app.schemas import (
     FieldMatchResponse,
     SensorConfirmRequest,
     SensorConfirmResponse,
+    SensorDriftReport,
+    StructuredResponse,
 )
 from app.config import settings
 from app.database import influx_manager
@@ -152,6 +155,36 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Global exception handlers → StructuredResponse
+# ---------------------------------------------------------------------------
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    status = "error" if exc.status_code < 500 else "fatal"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=StructuredResponse(
+            status=status,
+            detail=exc.detail,
+        ).model_dump(exclude_none=True),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled exception: %s", exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content=StructuredResponse(
+            status="fatal",
+            detail=f"{type(exc).__name__}: {exc}",
+            next_steps=["Check server logs for full traceback"],
+        ).model_dump(exclude_none=True),
+    )
 
 
 async def require_api_key(x_api_key: str = Header(None)):
@@ -476,6 +509,7 @@ async def confirm_sensor_mapping(mapping_id: str, req: SensorConfirmRequest = No
     with open(config_path, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
+    settings.invalidate_config_cache()
     logger.info("Field mapping saved: %s", field_mapping)
 
     return SensorConfirmResponse(
@@ -516,6 +550,7 @@ async def delete_sensor_mapping():
     with open(config_path, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
+    settings.invalidate_config_cache()
     logger.info("Field mapping removed from config")
     return {"status": "removed"}
 
@@ -532,3 +567,53 @@ async def get_sensor_sequence(sensor_id: str):
         raise HTTPException(status_code=503, detail="No active model loaded")
 
     return engine.get_sequence_state(sensor_id)
+
+
+@app.get("/sensors/{sensor_id}/drift", dependencies=auth)
+async def get_sensor_drift(sensor_id: str):
+    """Get drift report for a specific sensor.
+
+    Uses BME680 3-year drift coefficients as the canonical drift profile.
+    Requires at least 10 readings from this sensor_id to generate a report.
+    """
+    engine = inference_engines.get(active_model)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="No active model loaded")
+
+    report = engine.get_sensor_drift_report(sensor_id)
+    if report is None:
+        return {
+            "status": "insufficient_data",
+            "sensor_id": sensor_id,
+            "message": "Need at least 10 readings to generate drift report",
+        }
+
+    return report
+
+
+@app.post("/sensors/{sensor_id}/drift/save", dependencies=auth)
+async def save_sensor_drift(sensor_id: str):
+    """Persist drift state for a sensor to disk."""
+    engine = inference_engines.get(active_model)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="No active model loaded")
+
+    path = engine.save_sensor_drift(sensor_id)
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No drift state for sensor '{sensor_id}'",
+        )
+
+    return {"status": "saved", "sensor_id": sensor_id, "path": str(path)}
+
+
+@app.get("/sensors/drift/list", dependencies=auth)
+async def list_sensor_drift_reports():
+    """List all sensor_ids that have drift data."""
+    engine = inference_engines.get(active_model)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="No active model loaded")
+
+    sensor_ids = engine.list_sensor_drift_reports()
+    return {"sensor_ids": sensor_ids, "count": len(sensor_ids)}

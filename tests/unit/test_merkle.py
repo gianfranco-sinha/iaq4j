@@ -9,6 +9,7 @@ from training.merkle import (
     MerkleNode,
     _hash_dict,
     build_cleansed_data_node,
+    build_external_source_node,
     build_preprocessed_data_node,
     build_raw_data_node,
     build_sensor_node,
@@ -283,3 +284,205 @@ class TestHashDict:
     def test_returns_16_chars(self):
         h = _hash_dict({"test": "value"})
         assert len(h) == 16
+
+
+# ── build_external_source_node ────────────────────────────────────────────
+
+
+class TestBuildExternalSourceNode:
+    def test_basic(self):
+        node = build_external_source_node("OpenWeather", "https://api.openweathermap.org", "3.0")
+        assert node.node_type == "external_source"
+        assert node.content_inputs["source_name"] == "OpenWeather"
+        assert node.content_inputs["source_url"] == "https://api.openweathermap.org"
+        assert node.content_inputs["api_version"] == "3.0"
+        assert node.children == []
+
+    def test_with_extra(self):
+        node = build_external_source_node(
+            "PurpleAir", "https://api.purpleair.com", "1.0",
+            extra={"region": "US-West", "sensor_index": 12345},
+        )
+        assert node.content_inputs["extra"]["region"] == "US-West"
+
+    def test_no_extra_key_when_none(self):
+        node = build_external_source_node("X", "http://x", "1")
+        assert "extra" not in node.content_inputs
+
+    def test_hash_deterministic(self):
+        n1 = build_external_source_node("A", "http://a", "1")
+        n2 = build_external_source_node("A", "http://a", "1")
+        assert n1.compute_hash() == n2.compute_hash()
+
+    def test_different_source_different_hash(self):
+        n1 = build_external_source_node("A", "http://a", "1")
+        n2 = build_external_source_node("B", "http://b", "1")
+        assert n1.compute_hash() != n2.compute_hash()
+
+
+# ── Multi-source DAG ─────────────────────────────────────────────────────
+
+
+class TestMultiSourceDAG:
+    """Tests for DAG trees with multiple data sources feeding CleansedData."""
+
+    def _build_single_source_tree(self):
+        sensor = build_sensor_node("s1", "fw1", "bme680")
+        raw = build_raw_data_node(sensor, {"source_type": "influxdb"}, 1000)
+        cleansed = build_cleansed_data_node(raw, "fp1", 950, 50, "ok")
+        return cleansed, raw
+
+    def _build_multi_source_tree(self):
+        sensor = build_sensor_node("s1", "fw1", "bme680")
+        raw_sensor = build_raw_data_node(sensor, {"source_type": "influxdb"}, 1000)
+
+        ext = build_external_source_node("OpenWeather", "https://api.ow.org", "3.0")
+        raw_weather = build_raw_data_node(ext, {"source_type": "api"}, 500)
+
+        cleansed = build_cleansed_data_node(
+            [raw_sensor, raw_weather], "fp_merged", 1400, 100, "merged ok",
+        )
+        return cleansed, raw_sensor, raw_weather
+
+    def test_single_source_backward_compat(self):
+        """Single MerkleNode arg produces identical hash to list-of-one."""
+        sensor = build_sensor_node("s1", "fw1", "bme680")
+        raw = build_raw_data_node(sensor, {"source_type": "influxdb"}, 1000)
+
+        cleansed_single = build_cleansed_data_node(raw, "fp1", 950, 50, "ok")
+        cleansed_list = build_cleansed_data_node([raw], "fp1", 950, 50, "ok")
+
+        assert cleansed_single.compute_hash() == cleansed_list.compute_hash()
+
+    def test_multi_source_children_count(self):
+        cleansed, _, _ = self._build_multi_source_tree()
+        assert len(cleansed.children) == 2
+
+    def test_multi_source_child_types(self):
+        cleansed, _, _ = self._build_multi_source_tree()
+        types = {c.node_type for c in cleansed.children}
+        assert types == {"raw_data"}
+
+    def test_multi_source_hash_deterministic(self):
+        c1, _, _ = self._build_multi_source_tree()
+        c2, _, _ = self._build_multi_source_tree()
+        assert c1.compute_hash() == c2.compute_hash()
+
+    def test_multi_source_hash_differs_from_single(self):
+        single, _ = self._build_single_source_tree()
+        multi, _, _ = self._build_multi_source_tree()
+        assert single.compute_hash() != multi.compute_hash()
+
+    def test_child_order_irrelevant(self):
+        """Hash is the same regardless of child order (sorted by child hash)."""
+        sensor = build_sensor_node("s1", "fw1", "bme680")
+        raw_a = build_raw_data_node(sensor, {"source_type": "influxdb"}, 1000)
+
+        ext = build_external_source_node("Weather", "http://w", "1")
+        raw_b = build_raw_data_node(ext, {"source_type": "api"}, 500)
+
+        c1 = build_cleansed_data_node([raw_a, raw_b], "fp", 1400, 100, "ok")
+        c2 = build_cleansed_data_node([raw_b, raw_a], "fp", 1400, 100, "ok")
+
+        assert c1.compute_hash() == c2.compute_hash()
+
+    def test_full_dag_tree_round_trip(self):
+        """Serialize and deserialize a multi-source tree, verify hash."""
+        cleansed, _, _ = self._build_multi_source_tree()
+        prep = build_preprocessed_data_node(cleansed, "sfp", {}, {}, "sh", 10, 10, 1300)
+        split = build_split_data_node(prep, 0.2, 1040, 260)
+        root = build_trained_model_node(
+            split, "wh", {"mae": 3.0}, {"epochs": 50}, "mlp", "mlp-3.0.0",
+        )
+        root.compute_hash()
+        original_hash = root.content_hash
+
+        d = root.to_dict()
+        restored = MerkleNode.from_dict(d)
+        restored.compute_hash()
+        assert restored.content_hash == original_hash
+
+    def test_three_sources(self):
+        """Three data sources all feeding into CleansedData."""
+        sensor = build_sensor_node("s1", "fw1", "bme680")
+        raw_sensor = build_raw_data_node(sensor, {"source_type": "influxdb"}, 1000)
+
+        ext1 = build_external_source_node("Weather", "http://w", "1")
+        raw_ext1 = build_raw_data_node(ext1, {"source_type": "api"}, 500)
+
+        ext2 = build_external_source_node("AirQuality", "http://aq", "2")
+        raw_ext2 = build_raw_data_node(ext2, {"source_type": "api"}, 300)
+
+        cleansed = build_cleansed_data_node(
+            [raw_sensor, raw_ext1, raw_ext2], "fp3", 1700, 100, "3-way merge",
+        )
+        assert len(cleansed.children) == 3
+        cleansed.compute_hash()
+        assert len(cleansed.content_hash) == 64
+
+
+# ── Diff with DAG trees ──────────────────────────────────────────────────
+
+
+class TestDiffDAG:
+    """Tests for diff_merkle_trees with DAG (multi-child) structures."""
+
+    def _make_single_source_tree_dict(self, sensor_id="s1", weights="w1"):
+        sensor = build_sensor_node(sensor_id, "fw1", "bme680")
+        raw = build_raw_data_node(sensor, {"source_type": "influxdb"}, 100)
+        cleansed = build_cleansed_data_node(raw, "fp", 90, 10, "ok")
+        prep = build_preprocessed_data_node(cleansed, "sfp", {}, {}, "sh", 10, 10, 80)
+        split = build_split_data_node(prep, 0.2, 64, 16)
+        root = build_trained_model_node(split, weights, {"mae": 5.0}, {"epochs": 10}, "mlp", "1.0.0")
+        root.compute_hash()
+        return root.to_dict()
+
+    def _make_multi_source_tree_dict(self, sensor_id="s1", ext_name="Weather", weights="w1"):
+        sensor = build_sensor_node(sensor_id, "fw1", "bme680")
+        raw_sensor = build_raw_data_node(sensor, {"source_type": "influxdb"}, 100)
+
+        ext = build_external_source_node(ext_name, "http://w", "1")
+        raw_ext = build_raw_data_node(ext, {"source_type": "api"}, 50)
+
+        cleansed = build_cleansed_data_node([raw_sensor, raw_ext], "fp", 140, 10, "ok")
+        prep = build_preprocessed_data_node(cleansed, "sfp", {}, {}, "sh", 10, 10, 130)
+        split = build_split_data_node(prep, 0.2, 104, 26)
+        root = build_trained_model_node(split, weights, {"mae": 4.0}, {"epochs": 10}, "mlp", "1.0.0")
+        root.compute_hash()
+        return root.to_dict()
+
+    def test_identical_multi_source(self):
+        tree = self._make_multi_source_tree_dict()
+        result = diff_merkle_trees(tree, tree)
+        assert len(result["changed_levels"]) == 0
+        assert "trained_model" in result["unchanged_levels"]
+
+    def test_added_source(self):
+        """Single-source → multi-source: new child reported as +raw_data."""
+        old = self._make_single_source_tree_dict()
+        new = self._make_multi_source_tree_dict()
+        result = diff_merkle_trees(old, new)
+        assert "cleansed_data" in result["changed_levels"]
+        assert "+raw_data" in result["changed_levels"]
+
+    def test_removed_source(self):
+        """Multi-source → single-source: removed child reported as -raw_data."""
+        old = self._make_multi_source_tree_dict()
+        new = self._make_single_source_tree_dict()
+        result = diff_merkle_trees(old, new)
+        assert "-raw_data" in result["changed_levels"]
+
+    def test_changed_external_source(self):
+        """Same structure but different external source name."""
+        old = self._make_multi_source_tree_dict(ext_name="Weather")
+        new = self._make_multi_source_tree_dict(ext_name="PurpleAir")
+        result = diff_merkle_trees(old, new)
+        assert "cleansed_data" in result["changed_levels"]
+
+    def test_unchanged_sensor_branch_in_multi_source(self):
+        """When only external source changes, sensor branch is unchanged."""
+        old = self._make_multi_source_tree_dict(ext_name="Weather")
+        new = self._make_multi_source_tree_dict(ext_name="PurpleAir")
+        result = diff_merkle_trees(old, new)
+        # The sensor raw_data subtree should be matched by hash and unchanged
+        assert "sensor" in result["unchanged_levels"]

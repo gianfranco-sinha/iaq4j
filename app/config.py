@@ -102,6 +102,11 @@ class Settings(BaseSettings):
             },
         }
 
+    def invalidate_config_cache(self) -> None:
+        """Clear cached config so next access re-reads from YAML."""
+        self._model_config_cache = None
+        self._database_config_cache = None
+
     def get_sensor_identity(self) -> Dict[str, Any]:
         """Get sensor identity (sensor_id, firmware_version) from config."""
         config = self.load_model_config()

@@ -3,9 +3,10 @@ Database connectivity and health checks for InfluxDB.
 Supports both InfluxDB 1.x and 2.x
 """
 
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 import logging
 import json
+from datetime import datetime
 from app.config import settings
 
 # Import appropriate client based on version
@@ -300,6 +301,119 @@ class InfluxDBManager:
             self.connected = False
             self.last_error = str(e)
             return False
+
+    # ------------------------------------------------------------------
+    # Read queries
+    # ------------------------------------------------------------------
+
+    def _ensure_connected(self) -> bool:
+        """Ensure connection is alive, attempting reconnect if needed."""
+        if not self.db_config.get("enabled", False):
+            return False
+        if not self.connected:
+            self._connect()
+        return self.connected
+
+    def _query_v1(self, query: str) -> List[Dict]:
+        """Execute an InfluxQL query and return rows as list of dicts."""
+        result = self.client.query(query)
+        rows = []
+        for measurement, points in result.items():
+            for point in points:
+                rows.append(dict(point))
+        return rows
+
+    def query_predictions(
+        self,
+        start: str,
+        stop: str,
+        model_type: str = None,
+    ) -> List[Dict]:
+        """Read back predictions by time range and optional model type.
+
+        Args:
+            start: ISO-8601 start time (inclusive).
+            stop: ISO-8601 stop time (exclusive).
+            model_type: Optional model tag filter.
+
+        Returns:
+            List of prediction records as dicts.
+        """
+        if not self._ensure_connected():
+            return []
+
+        where = f"time >= '{start}' AND time < '{stop}'"
+        if model_type:
+            where += f" AND \"model\" = '{model_type}'"
+
+        query = f"SELECT * FROM \"iaq_predictions\" WHERE {where}"
+        try:
+            return self._query_v1(query)
+        except Exception as e:
+            logger.error(f"query_predictions failed: {e}")
+            self.last_error = str(e)
+            return []
+
+    def query_raw_readings(
+        self,
+        start: str,
+        stop: str,
+        measurement: str = None,
+    ) -> List[Dict]:
+        """Read raw sensor readings by time range.
+
+        Args:
+            start: ISO-8601 start time (inclusive).
+            stop: ISO-8601 stop time (exclusive).
+            measurement: InfluxDB measurement name (default from config).
+
+        Returns:
+            List of reading records as dicts.
+        """
+        if not self._ensure_connected():
+            return []
+
+        if measurement is None:
+            measurement = self.db_config.get("measurement", "bme688")
+
+        query = (
+            f"SELECT * FROM \"{measurement}\" "
+            f"WHERE time >= '{start}' AND time < '{stop}'"
+        )
+        try:
+            return self._query_v1(query)
+        except Exception as e:
+            logger.error(f"query_raw_readings failed: {e}")
+            self.last_error = str(e)
+            return []
+
+    def query_prediction_vs_actual(
+        self,
+        start: str,
+        stop: str,
+        model_type: str = None,
+    ) -> List[Dict]:
+        """Return predictions that have both iaq_predicted and iaq_actual.
+
+        Useful for evaluation: compute MAE, RMSE, R² on held-out actuals.
+        """
+        if not self._ensure_connected():
+            return []
+
+        where = f"time >= '{start}' AND time < '{stop}'"
+        if model_type:
+            where += f" AND \"model\" = '{model_type}'"
+
+        query = (
+            f"SELECT \"iaq_predicted\", \"iaq_actual\" FROM \"iaq_predictions\" "
+            f"WHERE {where} AND \"iaq_actual\" > 0"
+        )
+        try:
+            return self._query_v1(query)
+        except Exception as e:
+            logger.error(f"query_prediction_vs_actual failed: {e}")
+            self.last_error = str(e)
+            return []
 
     def close(self):
         """Close InfluxDB connection."""

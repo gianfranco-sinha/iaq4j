@@ -1,0 +1,81 @@
+# ============================================================================
+# IAQ Standard Registry for iaq4j
+# ============================================================================
+# Declarative definitions of indoor air quality standards. Each standard
+# defines a target scale, category breakpoints, and directionality.
+#
+# Each entry has:
+#   description      - human-readable description
+#   target_column    - column name in training data for the target value
+#   scale_range      - [min, max] of the output scale
+#   higher_is_worse  - true if higher values mean worse air quality
+#   categories       - ordered list of {upper_bound, name} breakpoints
+#                      (last entry should use .inf)
+
+bsec:
+  description: "Bosch BSEC indoor air quality index"
+  target_column: iaq
+  scale_range: [0, 500]
+  higher_is_worse: true
+  categories:
+    - upper_bound: 50
+      name: Excellent
+    - upper_bound: 100
+      name: Good
+    - upper_bound: 200
+      name: Moderate
+    - upper_bound: 300
+      name: Poor
+    - upper_bound: .inf
+      name: Very Poor
+
+epa_aqi:
+  description: "US EPA Air Quality Index"
+  target_column: aqi
+  scale_range: [0, 500]
+  higher_is_worse: true
+  categories:
+    - upper_bound: 50
+      name: Good
+    - upper_bound: 100
+      name: Moderate
+    - upper_bound: 150
+      name: Unhealthy for Sensitive Groups
+    - upper_bound: 200
+      name: Unhealthy
+    - upper_bound: 300
+      name: Very Unhealthy
+    - upper_bound: .inf
+      name: Hazardous
+
+iaqi:
+  description: "Indoor Air Quality Index (Atmotube-style, higher is better)"
+  target_column: iaqi
+  scale_range: [0, 100]
+  higher_is_worse: false
+  categories:
+    - upper_bound: 20
+      name: Very Poor
+    - upper_bound: 40
+      name: Poor
+    - upper_bound: 60
+      name: Moderate
+    - upper_bound: 80
+      name: Good
+    - upper_bound: .inf
+      name: Excellent
+
+reset_air:
+  description: "RESET Air Standard (percentage score, higher is better)"
+  target_column: reset_air
+  scale_range: [0, 100]
+  higher_is_worse: false
+  categories:
+    - upper_bound: 25
+      name: Poor
+    - upper_bound: 50
+      name: Fair
+    - upper_bound: 75
+      name: Good
+    - upper_bound: .inf
+      name: Excellent

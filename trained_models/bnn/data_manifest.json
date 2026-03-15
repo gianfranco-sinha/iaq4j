@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-03-09T19:59:23.856366",
+  "created_at": "2026-03-09T19:57:24.958108",
   "git_commit": "fe303a0",
   "data_fingerprint": "8e6d5895ba585dc7fedb9b5896ca2e8cf2d811051c4e98f61caacbf55eb62d61",
   "data_source": {
@@ -8,7 +8,7 @@
     "seed": 42
   },
   "config": {
-    "model_type": "mlp",
+    "model_type": "bnn",
     "epochs": 100,
     "window_size": 10,
     "batch_size": 32,
@@ -108,7 +108,7 @@
     },
     {
       "stage": "ingestion",
-      "duration_seconds": 0.012,
+      "duration_seconds": 0.026,
       "rows_in": 1000,
       "rows_out": 1000,
       "columns": [
@@ -193,53 +193,53 @@
     },
     {
       "stage": "training",
-      "duration_seconds": 23.053,
+      "duration_seconds": 65.39,
       "rows_in": null,
       "rows_out": null,
       "columns": null,
       "extra": {
         "epochs": 100,
-        "best_val_loss": 0.001813657074567995,
+        "best_val_loss": 0.11869901205812182,
         "device": "mps",
-        "tensorboard_log_dir": "runs/mlp_20260309_195900"
+        "tensorboard_log_dir": "runs/bnn_20260309_195619"
       }
     },
     {
       "stage": "evaluation",
-      "duration_seconds": 0.027,
+      "duration_seconds": 0.049,
       "rows_in": null,
       "rows_out": null,
       "columns": null,
       "extra": {
-        "mae": 14.223004535999522,
-        "rmse": 17.443678140464716,
-        "r2": 0.9199294610453708
+        "mae": 55.01441199183929,
+        "rmse": 74.06174653026355,
+        "r2": -0.443392754977308
       }
     }
   ],
   "preprocessing_issues": [],
   "metrics": {
-    "mae": 14.223004535999522,
-    "rmse": 17.443678140464716,
-    "r2": 0.9199294610453708
+    "mae": 55.01441199183929,
+    "rmse": 74.06174653026355,
+    "r2": -0.443392754977308
   },
-  "version": "mlp-2.12.0",
+  "version": "bnn-2.3.0",
   "merkle_tree": {
     "node_type": "trained_model",
     "content_inputs": {
-      "model_type": "mlp",
-      "weights_hash": "37ee3957bbef78393b82807e48c31aa5952f1a93f42f1d38e07691e00293ff1e",
+      "model_type": "bnn",
+      "weights_hash": "7eaaac9c30a0f209a2ba0e4c22be0a702df78ed63345130aa1844c0a800ab816",
       "metrics": {
-        "mae": 14.223004535999522,
-        "rmse": 17.443678140464716,
-        "r2": 0.9199294610453708
+        "mae": 55.01441199183929,
+        "rmse": 74.06174653026355,
+        "r2": -0.443392754977308
       },
       "epochs": 100,
       "learning_rate": 0.001,
       "batch_size": 32,
-      "version": "mlp-2.12.0"
+      "version": "bnn-2.3.0"
     },
-    "content_hash": "fbccb4579b3d0f1db4352e99b739c15d9f2310976b62e3a9ba9c694951f781c9",
+    "content_hash": "61a7be59dc6a9ae286e4b98327d3debbaf002eb4fe873a2abffc31fef98e8c4a",
     "children": [
       {
         "node_type": "split_data",
@@ -248,12 +248,12 @@
           "train_samples": 792,
           "val_samples": 199
         },
-        "content_hash": "bb257ff9e8dfc2df48326f638ea2d9f66f96d8a023ea3fae3e2c1e85f6eeb812",
+        "content_hash": "17f930f63055b9ce31a68d97017d531087a4845dc9b320fbe633c5e34eb6c0a4",
         "children": [
           {
             "node_type": "preprocessed_data",
             "content_inputs": {
-              "schema_fingerprint": "317cc3b2111a",
+              "schema_fingerprint": "b1f6a0edf040",
               "feature_stats_hash": "fb33eb88a0b9fb99",
               "baselines": {
                 "voc_resistance": 101566.29942090978
@@ -263,7 +263,7 @@
               "num_features": 10,
               "sample_count": 991
             },
-            "content_hash": "f7b7a08deb7d8af11e7c07c8a35ec2f13441895f85fa8b676c62b53b7ba3457f",
+            "content_hash": "ad799f5cdb48752b234701f1325deb0d30863a27244830b21bb9007f089e4e5d",
             "children": [
               {
                 "node_type": "cleansed_data",
@@ -305,5 +305,5 @@
       }
     ]
   },
-  "merkle_root_hash": "fbccb4579b3d0f1db4352e99b739c15d9f2310976b62e3a9ba9c694951f781c9"
+  "merkle_root_hash": "61a7be59dc6a9ae286e4b98327d3debbaf002eb4fe873a2abffc31fef98e8c4a"
 }

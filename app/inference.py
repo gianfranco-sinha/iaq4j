@@ -6,9 +6,11 @@ Inference logic for IAQ prediction.
 Handles batch processing, streaming, and real-time predictions.
 """
 
+import json
 import logging
 import math
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
@@ -116,6 +118,159 @@ def _apply_bayesian_update(
     }
 
 
+DRIFT_REPORTS_DIR = Path(settings.TRAINED_MODELS_BASE) / "drift_reports"
+
+
+class _SensorDriftState:
+    """Per-sensor drift tracking state.
+
+    Accumulates raw readings with timestamps and computes running statistics.
+    Uses BME680 3-year drift coefficients to estimate per-feature drift
+    based on observed sensor age.
+    """
+
+    def __init__(self, sensor_id: str, max_readings: int = 1000):
+        self.sensor_id = sensor_id
+        self.max_readings = max_readings
+        self.readings: List[Dict[str, float]] = []
+        self.timestamps: List[datetime] = []
+        self.readings_count: int = 0
+
+    def add_reading(self, reading: Dict[str, float], timestamp: Optional[datetime] = None):
+        """Accumulate a reading with its timestamp."""
+        self.readings.append(dict(reading))
+        self.timestamps.append(timestamp or datetime.now(timezone.utc))
+        self.readings_count += 1
+
+        # Keep rolling window
+        if len(self.readings) > self.max_readings:
+            self.readings.pop(0)
+            self.timestamps.pop(0)
+
+    def generate_report(self) -> Optional[Dict]:
+        """Generate a drift report using BME680 drift coefficients.
+
+        Returns None if fewer than 10 readings accumulated.
+        """
+        if len(self.readings) < 10:
+            return None
+
+        from app.profiles import get_sensor_profile
+        from training.drift_correction import load_drift_summary, compute_sensor_age_days
+
+        import pandas as pd
+
+        profile = get_sensor_profile()
+
+        # Load drift coefficients
+        try:
+            summary = load_drift_summary()
+        except FileNotFoundError:
+            logger.warning("Drift summary not found — cannot generate drift report")
+            return None
+
+        sensor_start = summary.date_start
+        coefficients = summary.coefficients
+
+        # Compute sensor age from first and last reading timestamps
+        first_ts = pd.Timestamp(self.timestamps[0])
+        last_ts = pd.Timestamp(self.timestamps[-1])
+        # Ensure tz-aware for comparison with sensor_start
+        if first_ts.tzinfo is None:
+            first_ts = first_ts.tz_localize("UTC")
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.tz_localize("UTC")
+        age_at_first = compute_sensor_age_days(sensor_start, first_ts)
+        age_at_last = compute_sensor_age_days(sensor_start, last_ts)
+
+        # Per-feature statistics and estimated drift
+        feature_reports = {}
+        warnings = []
+
+        for feat in profile.raw_features:
+            values = [r.get(feat) for r in self.readings if feat in r]
+            if not values:
+                continue
+
+            feat_mean = float(np.mean(values))
+            feat_std = float(np.std(values))
+            feat_min = float(np.min(values))
+            feat_max = float(np.max(values))
+            cv = feat_std / abs(feat_mean) if feat_mean != 0 else 0.0
+
+            coeff = coefficients.get(feat)
+            estimated_drift = None
+            drift_pct = None
+            if coeff and age_at_last > 0:
+                # Estimated total drift = slope * age
+                estimated_drift = coeff.trend_slope_per_day * age_at_last
+                if feat_mean != 0:
+                    drift_pct = (estimated_drift / abs(feat_mean)) * 100
+
+            feature_reports[feat] = {
+                "mean": feat_mean,
+                "std": feat_std,
+                "min": feat_min,
+                "max": feat_max,
+                "cv": round(cv, 6),
+                "estimated_drift": round(estimated_drift, 4) if estimated_drift is not None else None,
+                "estimated_drift_pct": round(drift_pct, 2) if drift_pct is not None else None,
+                "drift_status": coeff.status if coeff else "unknown",
+            }
+
+            # Warnings
+            if coeff and coeff.status == "DRIFT" and drift_pct is not None and abs(drift_pct) > 10:
+                warnings.append(
+                    f"{feat}: estimated drift {drift_pct:.1f}% over {age_at_last:.0f} days"
+                )
+            if cv > 0.3:
+                warnings.append(f"{feat}: high variability (CV={cv:.2f})")
+            elif cv < 0.01 and feat_mean != 0:
+                warnings.append(f"{feat}: appears stuck (CV={cv:.4f})")
+
+        # Overall health
+        has_drift = any(
+            f.get("drift_status") == "DRIFT" and
+            f.get("estimated_drift_pct") is not None and
+            abs(f["estimated_drift_pct"]) > 10
+            for f in feature_reports.values()
+        )
+        health = "drift" if has_drift else ("warning" if warnings else "good")
+
+        return {
+            "sensor_id": self.sensor_id,
+            "sensor_start": str(sensor_start.date()),
+            "first_reading": self.timestamps[0].isoformat(),
+            "last_reading": self.timestamps[-1].isoformat(),
+            "sensor_age_days": round(age_at_last, 1),
+            "readings_count": self.readings_count,
+            "readings_in_window": len(self.readings),
+            "features": feature_reports,
+            "warnings": warnings,
+            "health": health,
+        }
+
+    def to_dict(self) -> Dict:
+        """Serialize state for persistence."""
+        return {
+            "sensor_id": self.sensor_id,
+            "readings_count": self.readings_count,
+            "readings": self.readings[-self.max_readings:],
+            "timestamps": [t.isoformat() for t in self.timestamps[-self.max_readings:]],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "_SensorDriftState":
+        """Restore state from persisted dict."""
+        state = cls(sensor_id=data["sensor_id"])
+        state.readings_count = data.get("readings_count", 0)
+        state.readings = data.get("readings", [])
+        state.timestamps = [
+            datetime.fromisoformat(t) for t in data.get("timestamps", [])
+        ]
+        return state
+
+
 class InferenceEngine:
     """High-level inference engine for IAQ prediction."""
 
@@ -133,6 +288,8 @@ class InferenceEngine:
         # Readings arriving more than this many seconds after the previous one
         # are flagged as stale (gap > 2× typical 30 s BME680 LP interval).
         self._staleness_threshold_seconds: float = 60.0
+        # Per-sensor drift tracking
+        self._sensor_drift: Dict[str, _SensorDriftState] = {}
 
     def _validate_sequence(
         self,
@@ -431,6 +588,10 @@ class InferenceEngine:
             if parsed_ts is not None:
                 self._last_reading_ts = parsed_ts
 
+            # Accumulate per-sensor drift state
+            if sensor_id is not None:
+                self.update_sensor_drift(sensor_id, readings, parsed_ts)
+
             # Supplement with history-based uncertainty for models without dropout
             predicted = result.get("predicted", {})
             unc = predicted.get("uncertainty", {})
@@ -562,6 +723,96 @@ class InferenceEngine:
             "warnings": warnings,
             "health": "good" if not warnings else "warning",
         }
+
+    # ------------------------------------------------------------------
+    # Per-sensor drift tracking
+    # ------------------------------------------------------------------
+
+    def update_sensor_drift(
+        self,
+        sensor_id: str,
+        readings: Dict[str, float],
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Accumulate a reading for per-sensor drift tracking.
+
+        Called automatically from predict_single when sensor_id is provided.
+        """
+        if sensor_id not in self._sensor_drift:
+            # Try loading persisted state
+            state = self._load_drift_state(sensor_id)
+            if state is None:
+                state = _SensorDriftState(sensor_id=sensor_id)
+            self._sensor_drift[sensor_id] = state
+
+        self._sensor_drift[sensor_id].add_reading(readings, timestamp)
+
+    def get_sensor_drift_report(self, sensor_id: str) -> Optional[Dict]:
+        """Generate a drift report for a specific sensor.
+
+        Uses BME680 3-year drift coefficients as the canonical drift profile
+        for all BME680 sensors. This assumption will be validated as more
+        sensor units are deployed.
+
+        Returns None if insufficient data (< 10 readings).
+        """
+        state = self._sensor_drift.get(sensor_id)
+        if state is None:
+            # Try loading from disk
+            state = self._load_drift_state(sensor_id)
+            if state is None:
+                return None
+            self._sensor_drift[sensor_id] = state
+
+        return state.generate_report()
+
+    def save_sensor_drift(self, sensor_id: str) -> Optional[Path]:
+        """Persist drift state for a sensor to JSON."""
+        state = self._sensor_drift.get(sensor_id)
+        if state is None:
+            return None
+
+        DRIFT_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = DRIFT_REPORTS_DIR / f"{sensor_id}.json"
+
+        # Save both the raw state (for reload) and the current report
+        payload = state.to_dict()
+        report = state.generate_report()
+        if report is not None:
+            payload["report"] = report
+
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+
+        logger.info("Drift state saved for sensor %s → %s", sensor_id, path)
+        return path
+
+    def _load_drift_state(self, sensor_id: str) -> Optional[_SensorDriftState]:
+        """Load persisted drift state from disk."""
+        path = DRIFT_REPORTS_DIR / f"{sensor_id}.json"
+        if not path.exists():
+            return None
+
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            state = _SensorDriftState.from_dict(data)
+            logger.info(
+                "Loaded drift state for sensor %s: %d readings",
+                sensor_id, state.readings_count,
+            )
+            return state
+        except Exception as e:
+            logger.warning("Failed to load drift state for %s: %s", sensor_id, e)
+            return None
+
+    def list_sensor_drift_reports(self) -> List[str]:
+        """List sensor_ids that have drift state (in-memory or on disk)."""
+        ids = set(self._sensor_drift.keys())
+        if DRIFT_REPORTS_DIR.exists():
+            for p in DRIFT_REPORTS_DIR.glob("*.json"):
+                ids.add(p.stem)
+        return sorted(ids)
 
 
 class StreamingInference:

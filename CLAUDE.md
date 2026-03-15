@@ -40,13 +40,20 @@ tensorboard --logdir runs/
 # MLflow experiment tracking UI
 mlflow ui --port 5000
 
-# Linting / type checking
+# Tests (pytest — 266+ tests, Tier 1 + Tier 2)
+python -m pytest                                          # all tests
+python -m pytest tests/unit/test_models.py -v             # single file
+python -m pytest tests/unit/test_models.py::TestBuildModel -v             # single class
+python -m pytest tests/unit/test_models.py::TestBuildModel::test_build_mlp -v  # single test
+python -m pytest --cov=app --cov=training tests/          # with coverage
+
+# Linting / type checking (black/mypy commented out in requirements.txt — may not be installed)
 ruff check app/ training/
 mypy app/
 black app/ training/
-
-# No pytest suite exists yet
 ```
+
+**Test structure**: `tests/unit/` (10 files) + `tests/integration/test_pipeline.py`. Config: `pytest.ini` (testpaths=tests, pythonpath=.). Key fixtures in `tests/conftest.py`: `bme680_profile`, `bsec_standard`, `sample_raw_data`, `sample_reading`, `sample_timestamps`, `patched_models_base`, `model_artifact_dir`, `fast_pipeline_kwargs`.
 
 ## Architecture
 
@@ -72,10 +79,10 @@ Both paths save artifacts to `trained_models/{model_type}/` (model.pt, config.js
 
 ## Key Technical Details
 
-- **Features are profile-driven**: `SensorProfile.raw_features` + `SensorProfile.engineered_feature_names` determine `num_features`. BME680 default: 4 raw + 2 engineered = 6.
+- **Features are profile-driven**: `SensorProfile.raw_features` + `SensorProfile.engineered_feature_names` determine `num_features`. BME680 default: 4 raw + 6 engineered (2 derived + 4 cyclical temporal) = 10.
 - **Feature engineering is code**: each `SensorProfile` subclass owns its `engineer_features()` method. No config DSL.
 - **Sliding window**: all models buffer `window_size` readings before first prediction. `IAQPredictor.buffer` manages this.
-- **Input dimensions**: MLP/KAN/BNN flatten to `window_size × num_features`; LSTM/CNN keep temporal shape `(batch, window_size, num_features)`.
+- **Input dimensions**: Training pipeline passes flattened `(batch, window_size * num_features)` to ALL models. MLP/KAN/BNN consume it directly. LSTM reshapes internally to `(batch, window_size, num_features)`. CNN reshapes AND permutes to `(batch, num_features, window_size)` for Conv1d.
 - **Scaling**: StandardScaler for features, MinMaxScaler(0,1) for targets. Scalers saved as .pkl alongside models.
 - **KAN**: `efficient-kan` vendored in `app/kan.py` to remove the external dependency (which broke on Python >3.9 on Apple Silicon).
 - **BNN**: Bayesian Neural Network with variational weight layers. Produces `kl_loss` for ELBO training. Config: `prior_sigma`, `kl_weight`.
@@ -97,6 +104,7 @@ Both paths save artifacts to `trained_models/{model_type}/` (model.pt, config.js
 - All models inherit `torch.nn.Module`
 - Profile registration: `import app.builtin_profiles  # noqa: F401` — required wherever profiles are needed (main.py, pipeline.py)
 - Backward compat: old model artifacts with `baseline_gas_resistance` key still load; `SensorReading` accepts both old 4-field and new `readings` format
+- See `AGENTS.md` for DDD guidelines, bounded context responsibilities, code style details, and agent boundary rules (what requires confirmation vs. safe to do autonomously)
 
 ## Deployment
 
@@ -121,12 +129,12 @@ ssh pi@<production-host> 'journalctl -u iaq4j -f'
 
 ## Roadmap
 
-See `docs/roadmap.md` for pending features. Current status:
-- ~~Physical quantity registry (P0)~~ — **DONE** (`quantities.yaml` + `app/quantities.py`)
-- ~~Semantic field mapping (P1)~~ — **DONE** (CLI `map-fields` + REST `/sensors/register`)
-- ~~Artifact semver (P1)~~ — **DONE**
-- ~~Sensor Registration API (P1)~~ — **DONE**
-- **MLflow Integration (P1)** — Basic integration live in `training/train.py`: experiment set, run started per training job, 3 params + 4 metrics + model artifact logged, `FAILED` status on exception. Remaining: log full `collect_run_params()` dict, wire `on_epoch` callback to `mlflow.log_metrics(..., step=epoch)`, log scaler artifacts + `data_manifest.json`, set tags (version, schema_fingerprint, merkle_root), update standalone scripts. Open: deployment mode (local `mlruns/` vs tracking server), layer vs replace MANIFEST.json, model registry.
-- **LLM Readiness (P1)** — Phase 1: config cache invalidation, InfluxDB reads, training exception propagation, standardized error model. Phase 2: REST endpoints for profiles, quantities, models, history, config, training trigger, audit. Phase 3 = LLM Agent.
-- **LLM Agent (P2)** — depends on LLM Readiness Phase 1+2. Tool registry maps 1:1 to Phase 2 endpoints.
-- ~~**LabelStudio data source**~~ — **DONE**. `validate()` (Stage 1) + `fetch()` (Stage 2) fully implemented in `training/data_sources.py`.
+See `docs/roadmap.md` for full details and canonical implementation order. Next up:
+- **P1: LLM Readiness Phase 1** — config cache, InfluxDB reads, typed exceptions, StructuredResponse
+- **P1: Multi-source Pipeline** — depends on DAG Merkle; settles pipeline.py ingestion before MLflow
+- **P1: Label Studio DB Integration** — export InfluxDB → Label Studio for annotation
+- **P1: MCP Server** — depends on Phase 1
+- **P2: MLflow Integration** — demoted; basic integration live in `training/train.py`, remaining work adds callbacks to final pipeline shape
+- **P2: LLM-Driven Pipeline Design** — capstone
+
+Completed: physical quantity registry, semantic field mapping, artifact semver, sensor registration API, LabelStudio data source, temporal feature engineering, security hardening, pytest Tier 1+2, training checkpoint & resume, DAG Merkle tree.

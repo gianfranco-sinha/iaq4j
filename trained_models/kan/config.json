@@ -2,16 +2,16 @@
   "sensor_type": "bme680",
   "iaq_standard": "bsec",
   "baselines": {
-    "voc_resistance": 199221.8
+    "voc_resistance": 101566.29942090978
   },
-  "baseline_gas_resistance": 199221.8,
-  "trained_date": "2026-02-26T14:19:49.163474",
+  "baseline_gas_resistance": 101566.29942090978,
+  "trained_date": "2026-03-09T19:59:00.695437",
   "window_size": 10,
-  "mae": 1.046149819430695,
-  "rmse": 1.2312856601886188,
-  "r2": -2.8190484858976954,
+  "mae": 37.431320670632296,
+  "rmse": 47.37507150081218,
+  "r2": 0.4093960066357891,
   "notes": "Trained with KAN (bme680/bsec)",
-  "version": "kan-1.1.0",
-  "schema_fingerprint": "0286bb5bf5ad",
-  "merkle_root_hash": "fa18f958a4bfaf80814aa42084cdb2b8e798dd273fd17c80229be970bcb0be75"
+  "version": "kan-2.5.0",
+  "schema_fingerprint": "d61cb920844a",
+  "merkle_root_hash": "48d43161f9aeec781e946ce31c7ed2932279f705ca5e05f473929d7c86f6a94a"
 }

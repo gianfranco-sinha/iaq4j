@@ -71,8 +71,9 @@ tqdm==4.67.1
 # ============================================================================
 # Development Tools (Optional - uncomment to install)
 # ============================================================================
-# pytest==7.4.4              # Testing framework
-# pytest-cov==4.1.0          # Code coverage
+pytest==7.4.4              # Testing framework
+pytest-cov==4.1.0          # Code coverage
+hypothesis>=6.100.0        # Property-based testing
 # black==24.1.1              # Code formatter
 # flake8==7.0.0              # Linter
 # isort==5.13.2              # Import sorter

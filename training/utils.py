@@ -5,7 +5,9 @@ import logging
 import os
 import pickle
 import random
+import signal
 import subprocess
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -99,6 +101,46 @@ def calculate_absolute_humidity(temperature, rel_humidity):
     return (6.112 * np.exp(alpha) * 2.1674) / (273.15 + temperature)
 
 
+def load_checkpoint(checkpoint_path: str) -> Optional[dict]:
+    """Load a training checkpoint if it exists. Returns None if not found."""
+    path = Path(checkpoint_path)
+    if not path.exists():
+        return None
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        logger.info("Loaded checkpoint from %s (epoch %d)", path, checkpoint.get("epoch", 0))
+        return checkpoint
+    except Exception as e:
+        logger.warning("Failed to load checkpoint %s: %s", path, e)
+        return None
+
+
+def _save_checkpoint(
+    path: str,
+    epoch: int,
+    model,
+    optimizer,
+    scheduler,
+    train_losses: list,
+    val_losses: list,
+    best_val_loss: float,
+) -> None:
+    """Save a training checkpoint to disk."""
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "train_losses": train_losses,
+            "val_losses": val_losses,
+            "best_val_loss": best_val_loss,
+        },
+        path,
+    )
+    logger.info("Saved checkpoint at epoch %d to %s", epoch, path)
+
+
 def train_model(
     model, X_train, y_train, X_val, y_val, model_name,
     epochs=200, device=None, batch_size=32, learning_rate=0.001,
@@ -106,6 +148,9 @@ def train_model(
     log_dir=None, histogram_freq=50,
     seed=None,
     on_epoch=None,
+    checkpoint_path: Optional[str] = None,
+    checkpoint_freq: int = 20,
+    model_dir: Optional[str] = None,
 ):
     """Train a model with DataLoader, LR scheduler, and validation tracking.
 
@@ -115,6 +160,12 @@ def train_model(
         seed: If set, seed all RNGs and use a deterministic DataLoader shuffle.
         on_epoch: Optional callback invoked after each epoch with signature
             (epoch: int, train_loss: float, val_loss: float, lr: float) -> None.
+        checkpoint_path: If set and file exists, resume training from this checkpoint.
+        checkpoint_freq: Save checkpoint every N epochs (0 to disable).
+        model_dir: Directory to save checkpoint.pt into. Required for checkpointing.
+
+    Returns:
+        Dict with best_val_loss, train_losses, val_losses, and interrupted flag.
     """
     if seed is not None:
         seed_everything(seed)
@@ -154,72 +205,146 @@ def train_model(
     best_val_loss = float("inf")
     train_losses = []
     val_losses = []
+    start_epoch = 0
+    interrupted = False
 
-    for epoch in range(epochs):
-        model.train()
-        train_loss = 0
-        for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            predictions = model(batch_X)
-            loss = criterion(predictions, batch_y)
-            if hasattr(model, 'kl_loss'):
-                kl_weight = getattr(model, '_kl_weight', 1.0)
-                loss = loss + kl_weight * model.kl_loss() / len(train_loader.dataset)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
+    # ── Resume from checkpoint ────────────────────────────────────────
+    if checkpoint_path:
+        ckpt = load_checkpoint(checkpoint_path)
+        if ckpt is not None:
+            model.load_state_dict(ckpt["model_state_dict"])
+            model = model.to(device)
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            start_epoch = ckpt["epoch"]
+            train_losses = ckpt["train_losses"]
+            val_losses = ckpt["val_losses"]
+            best_val_loss = ckpt["best_val_loss"]
+            print(f"  Resuming from epoch {start_epoch} (best_val_loss={best_val_loss:.6f})")
 
-        train_loss /= len(train_loader)
-        train_losses.append(train_loss)
+    # ── Resolve checkpoint save path ──────────────────────────────────
+    ckpt_save_path = None
+    if model_dir and checkpoint_freq > 0:
+        ckpt_save_path = str(Path(model_dir) / "checkpoint.pt")
 
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for batch_X, batch_y in val_loader:
+    # ── Signal handling for graceful interrupt ────────────────────────
+    _interrupted = False
+
+    def _interrupt_handler(signum, frame):
+        nonlocal _interrupted
+        _interrupted = True
+
+    old_sigint = signal.signal(signal.SIGINT, _interrupt_handler)
+    old_sigterm = signal.signal(signal.SIGTERM, _interrupt_handler)
+
+    try:
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            train_loss = 0
+            for batch_X, batch_y in train_loader:
                 batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                optimizer.zero_grad()
                 predictions = model(batch_X)
                 loss = criterion(predictions, batch_y)
                 if hasattr(model, 'kl_loss'):
                     kl_weight = getattr(model, '_kl_weight', 1.0)
-                    loss = loss + kl_weight * model.kl_loss() / len(val_loader.dataset)
-                val_loss += loss.item()
+                    loss = loss + kl_weight * model.kl_loss() / len(train_loader.dataset)
+                if hasattr(model, 'regularization_loss'):
+                    reg_weight = getattr(model, '_reg_weight', 1.0)
+                    loss = loss + reg_weight * model.regularization_loss()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                train_loss += loss.item()
 
-        val_loss /= len(val_loader)
-        val_losses.append(val_loss)
-        scheduler.step(val_loss)
+            train_loss /= len(train_loader)
+            train_losses.append(train_loss)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for batch_X, batch_y in val_loader:
+                    batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                    predictions = model(batch_X)
+                    loss = criterion(predictions, batch_y)
+                    if hasattr(model, 'kl_loss'):
+                        kl_weight = getattr(model, '_kl_weight', 1.0)
+                        loss = loss + kl_weight * model.kl_loss() / len(val_loader.dataset)
+                    if hasattr(model, 'regularization_loss'):
+                        reg_weight = getattr(model, '_reg_weight', 1.0)
+                        loss = loss + reg_weight * model.regularization_loss()
+                    val_loss += loss.item()
 
-        if (epoch + 1) % 20 == 0:
-            print(f"  Epoch [{epoch + 1}/{epochs}], Train: {train_loss:.6f}, Val: {val_loss:.6f}")
+            val_loss /= len(val_loader)
+            val_losses.append(val_loss)
+            scheduler.step(val_loss)
 
-        # ── Epoch callback ────────────────────────────────────────────
-        if on_epoch is not None:
-            on_epoch(epoch, train_loss, val_loss, optimizer.param_groups[0]["lr"])
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
 
-        # ── TensorBoard logging ───────────────────────────────────────
-        if writer is not None:
-            writer.add_scalar("Loss/train", train_loss, epoch)
-            writer.add_scalar("Loss/val", val_loss, epoch)
-            writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
+            if (epoch + 1) % 20 == 0:
+                print(f"  Epoch [{epoch + 1}/{epochs}], Train: {train_loss:.6f}, Val: {val_loss:.6f}")
 
-            if histogram_freq > 0 and (epoch + 1) % histogram_freq == 0:
-                for name, param in model.named_parameters():
-                    writer.add_histogram(f"Weights/{name}", param, epoch)
-                    if param.grad is not None:
-                        writer.add_histogram(f"Gradients/{name}", param.grad, epoch)
+            # ── Epoch callback ────────────────────────────────────────
+            if on_epoch is not None:
+                on_epoch(epoch, train_loss, val_loss, optimizer.param_groups[0]["lr"])
+
+            # ── TensorBoard logging ───────────────────────────────────
+            if writer is not None:
+                writer.add_scalar("Loss/train", train_loss, epoch)
+                writer.add_scalar("Loss/val", val_loss, epoch)
+                writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
+
+                if histogram_freq > 0 and (epoch + 1) % histogram_freq == 0:
+                    for name, param in model.named_parameters():
+                        try:
+                            writer.add_histogram(f"Weights/{name}", param, epoch)
+                        except ValueError:
+                            pass
+                        if param.grad is not None:
+                            try:
+                                writer.add_histogram(f"Gradients/{name}", param.grad, epoch)
+                            except ValueError:
+                                pass
+
+            # ── Periodic checkpoint ───────────────────────────────────
+            if ckpt_save_path and (epoch + 1) % checkpoint_freq == 0:
+                _save_checkpoint(
+                    ckpt_save_path, epoch + 1, model, optimizer, scheduler,
+                    train_losses, val_losses, best_val_loss,
+                )
+
+            # ── Graceful interrupt ────────────────────────────────────
+            if _interrupted:
+                print(f"\n  Interrupted at epoch {epoch + 1} — saving checkpoint")
+                if ckpt_save_path:
+                    _save_checkpoint(
+                        ckpt_save_path, epoch + 1, model, optimizer, scheduler,
+                        train_losses, val_losses, best_val_loss,
+                    )
+                interrupted = True
+                break
+    finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
 
     if writer is not None:
         writer.flush()
         writer.close()
+
+    # ── Cleanup checkpoint on successful completion ───────────────────
+    if not interrupted and ckpt_save_path:
+        ckpt_path = Path(ckpt_save_path)
+        if ckpt_path.exists():
+            ckpt_path.unlink()
+            logger.info("Training complete — removed checkpoint %s", ckpt_save_path)
 
     print(f"  Best validation loss: {best_val_loss:.6f}")
     return {
         "best_val_loss": best_val_loss,
         "train_losses": train_losses,
         "val_losses": val_losses,
+        "interrupted": interrupted,
     }
 
 
@@ -313,11 +438,17 @@ def compute_schema_fingerprint(
     window_size: int,
     num_features: int,
     model_type: str,
+    feature_names: List[str] = None,
 ) -> str:
     """Hash the fields that define a model's input/output contract.
 
     If this fingerprint changes between versions, it signals a MAJOR (breaking)
     version bump — the model's input shape or contract has changed.
+
+    When feature_names is provided, it is included in the hash so that a
+    reordering of features (same count but different order) triggers a
+    fingerprint change.  When None, the hash is identical to the legacy
+    computation for backward compatibility.
     """
     schema = {
         "sensor_type": sensor_type,
@@ -326,6 +457,8 @@ def compute_schema_fingerprint(
         "num_features": num_features,
         "model_type": model_type,
     }
+    if feature_names is not None:
+        schema["feature_names"] = feature_names
     return hashlib.sha256(
         json.dumps(schema, sort_keys=True).encode()
     ).hexdigest()[:12]
@@ -468,6 +601,7 @@ def save_trained_model(
     baseline_gas_resistance=None,  # legacy compat
     training_history=None,
     data_manifest=None,
+    feature_names: List[str] = None,
 ):
     """Save a fully trained model with scalers, config, and checkpoint."""
     os.makedirs(model_dir, exist_ok=True)
@@ -496,6 +630,8 @@ def save_trained_model(
         "r2": float(metrics["r2"]),
         "notes": f"Trained with {model_type.upper()} ({sensor_type or 'bme680'}/{iaq_standard or 'bsec'})",
     }
+    if feature_names is not None:
+        config["feature_names"] = feature_names
     if sensor_id:
         config["sensor_id"] = sensor_id
     if firmware_version:
@@ -562,3 +698,23 @@ def patch_config_with_merkle_hash(model_dir, merkle_root_hash: str) -> None:
     config["merkle_root_hash"] = merkle_root_hash
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
+
+
+def patch_manifest_merkle(model_type: str, version: str, merkle_root_hash: str) -> None:
+    """Patch the active run in central MANIFEST.json with merkle_root_hash."""
+    from app.config import settings
+
+    manifest_path = Path(settings.TRAINED_MODELS_BASE) / "MANIFEST.json"
+    if not manifest_path.exists():
+        return
+    with open(manifest_path) as f:
+        central = json.load(f)
+    for run in central.get("runs", []):
+        if (
+            run.get("model_type") == model_type
+            and run.get("is_active")
+            and run.get("version") == version
+        ):
+            run["merkle_root_hash"] = merkle_root_hash
+    with open(manifest_path, "w") as f:
+        json.dump(central, f, indent=2, default=str)

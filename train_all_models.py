@@ -29,13 +29,21 @@ if __name__ == "__main__":
         print(f"Training {model_type.upper()}...")
         print(f"{'─' * 70}")
 
-        source = InfluxDBSource(hours_back=168 * 8)
-        pipeline = TrainingPipeline(source, model_type=model_type, epochs=200)
-        pipeline.on_stage_complete(log_progress)
+        try:
+            source = InfluxDBSource(hours_back=168 * 8)
+            pipeline = TrainingPipeline(source, model_type=model_type, epochs=200, resume=True)
+            pipeline.on_stage_complete(log_progress)
 
-        result = pipeline.orchestrate()
-        results[model_type] = result.metrics
-        source.close()
+            result = pipeline.orchestrate()
+            if result.interrupted:
+                print(f"⏸️  {model_type.upper()} interrupted — checkpoint saved")
+                results[model_type] = None
+            else:
+                results[model_type] = result.metrics
+            source.close()
+        except Exception as e:
+            print(f"❌ {model_type.upper()} training failed: {e}")
+            results[model_type] = None
 
     print("\n" + "=" * 70)
     print("TRAINING COMPLETE!")

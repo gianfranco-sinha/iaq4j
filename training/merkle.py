@@ -1,13 +1,20 @@
-"""Merkle tree provenance for the training pipeline.
+"""Merkle DAG provenance for the training pipeline.
 
-Six-level tree chaining hashes from sensor leaf to trained model root:
+DAG structure supporting multiple data sources (sensor, external AQ APIs,
+weather APIs) feeding into one training run:
 
-    Sensor (leaf)
-      └─→ RawData
-            └─→ CleansedData
-                  └─→ PreprocessedData
-                        └─→ SplitData
-                              └─→ TrainedModel (root)
+    Sensor (leaf)          ExternalSource (leaf)
+      └─→ RawData           └─→ RawData
+            │                      │
+            └──────┬───────────────┘
+                   ▼
+             CleansedData
+                   └─→ PreprocessedData
+                         └─→ SplitData
+                               └─→ TrainedModel (root)
+
+Single-source trees remain a linear chain (identical hashes to previous
+format — CleansedData simply has one child instead of many).
 
 Each node's hash = SHA256(node_type || sorted_content || sorted(child_hashes)).
 """
@@ -18,7 +25,7 @@ import logging
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -146,6 +153,20 @@ def build_sensor_node(sensor_id: Optional[str], firmware_version: Optional[str],
     )
 
 
+def build_external_source_node(source_name: str, source_url: str,
+                               api_version: str,
+                               extra: Optional[Dict[str, Any]] = None) -> MerkleNode:
+    """Leaf node for non-sensor data sources (weather APIs, AQ APIs, etc.)."""
+    content = {
+        "source_name": source_name,
+        "source_url": source_url,
+        "api_version": api_version,
+    }
+    if extra:
+        content["extra"] = extra
+    return MerkleNode(node_type="external_source", content_inputs=content)
+
+
 def build_raw_data_node(sensor_node: MerkleNode, source_metadata: dict,
                         raw_row_count: int) -> MerkleNode:
     content = {"raw_row_count": raw_row_count}
@@ -161,9 +182,12 @@ def build_raw_data_node(sensor_node: MerkleNode, source_metadata: dict,
     )
 
 
-def build_cleansed_data_node(raw_data_node: MerkleNode, data_fingerprint: str,
+def build_cleansed_data_node(raw_data_nodes: Union[MerkleNode, List[MerkleNode]],
+                             data_fingerprint: str,
                              clean_row_count: int, rows_dropped: int,
                              issues_summary: str) -> MerkleNode:
+    if isinstance(raw_data_nodes, MerkleNode):
+        raw_data_nodes = [raw_data_nodes]
     return MerkleNode(
         node_type="cleansed_data",
         content_inputs={
@@ -172,7 +196,7 @@ def build_cleansed_data_node(raw_data_node: MerkleNode, data_fingerprint: str,
             "rows_dropped": rows_dropped,
             "issues_summary": issues_summary,
         },
-        children=[raw_data_node],
+        children=raw_data_nodes,
     )
 
 
@@ -356,7 +380,12 @@ def diff_merkle_trees(old_tree: dict, new_tree: dict) -> dict:
 
 
 def _diff_recursive(old: dict, new: dict, changed: list, unchanged: list):
-    """Recurse through paired nodes, comparing hashes."""
+    """Recurse through paired nodes, comparing hashes.
+
+    Children are matched by content_hash first (exact match), then by
+    node_type (best-effort pairing). Unmatched children are reported as
+    ``+type`` (added) or ``-type`` (removed).
+    """
     old_type = old.get("node_type", "")
     new_type = new.get("node_type", "")
 
@@ -375,11 +404,48 @@ def _diff_recursive(old: dict, new: dict, changed: list, unchanged: list):
 
     changed.append(old_type)
 
-    # Recurse into children (paired by index)
     old_children = old.get("children", [])
     new_children = new.get("children", [])
-    for oc, nc in zip(old_children, new_children):
-        _diff_recursive(oc, nc, changed, unchanged)
+
+    # Phase 1: match children by identical content_hash
+    old_by_hash = {c.get("content_hash", ""): c for c in old_children}
+    new_by_hash = {c.get("content_hash", ""): c for c in new_children}
+
+    matched_old_hashes = set()
+    matched_new_hashes = set()
+
+    for h in old_by_hash:
+        if h in new_by_hash:
+            # Identical subtree — mark unchanged
+            unchanged.append(old_by_hash[h].get("node_type", ""))
+            _collect_types(old_by_hash[h], unchanged)
+            matched_old_hashes.add(h)
+            matched_new_hashes.add(h)
+
+    unmatched_old = [c for c in old_children if c.get("content_hash", "") not in matched_old_hashes]
+    unmatched_new = [c for c in new_children if c.get("content_hash", "") not in matched_new_hashes]
+
+    # Phase 2: pair remaining children by node_type
+    old_by_type: Dict[str, list] = {}
+    for c in unmatched_old:
+        old_by_type.setdefault(c.get("node_type", ""), []).append(c)
+
+    paired_new = set()
+    for nc in unmatched_new:
+        nt = nc.get("node_type", "")
+        if nt in old_by_type and old_by_type[nt]:
+            oc = old_by_type[nt].pop(0)
+            _diff_recursive(oc, nc, changed, unchanged)
+            paired_new.add(id(nc))
+
+    # Phase 3: report unmatched as added/removed
+    for remaining in old_by_type.values():
+        for oc in remaining:
+            changed.append("-" + oc.get("node_type", ""))
+
+    for nc in unmatched_new:
+        if id(nc) not in paired_new:
+            changed.append("+" + nc.get("node_type", ""))
 
 
 def _collect_types(tree_dict: dict, out: list):
@@ -387,3 +453,97 @@ def _collect_types(tree_dict: dict, out: list):
     for child in tree_dict.get("children", []):
         out.append(child.get("node_type", ""))
         _collect_types(child, out)
+
+
+# ── High-level builder ────────────────────────────────────────────────────
+
+
+def build_merkle_tree_from_context(
+    *,
+    sensor_id: Optional[str],
+    firmware_version: Optional[str],
+    sensor_type: str,
+    source_metadata: dict,
+    raw_row_count: int,
+    clean_row_count: int,
+    data_fingerprint: str,
+    rows_dropped: int,
+    issues_summary: str,
+    schema_fingerprint: str,
+    feature_stats: dict,
+    baselines: dict,
+    feature_scaler,
+    target_scaler,
+    window_size: int,
+    num_features: int,
+    sample_count: int,
+    test_size: float,
+    train_samples: int,
+    val_samples: int,
+    model_state_dict: dict,
+    metrics: dict,
+    training_config: dict,
+    model_type: str,
+    version: str,
+) -> MerkleNode:
+    """Build the full 6-level Merkle provenance tree from explicit parameters.
+
+    Returns the root node with hashes computed.
+    """
+    # Level 1: Sensor (leaf)
+    sensor_node = build_sensor_node(
+        sensor_id=sensor_id,
+        firmware_version=firmware_version,
+        sensor_type=sensor_type,
+    )
+
+    # Level 2: RawData
+    raw_data_node = build_raw_data_node(
+        sensor_node=sensor_node,
+        source_metadata=source_metadata,
+        raw_row_count=raw_row_count,
+    )
+
+    # Level 3: CleansedData
+    cleansed_data_node = build_cleansed_data_node(
+        raw_data_nodes=raw_data_node,
+        data_fingerprint=data_fingerprint,
+        clean_row_count=clean_row_count,
+        rows_dropped=rows_dropped,
+        issues_summary=issues_summary,
+    )
+
+    # Level 4: PreprocessedData
+    scaler_hash = compute_scaler_hash(feature_scaler, target_scaler)
+    preprocessed_data_node = build_preprocessed_data_node(
+        cleansed_data_node=cleansed_data_node,
+        schema_fingerprint=schema_fingerprint,
+        feature_stats=feature_stats,
+        baselines=baselines,
+        scaler_hash=scaler_hash,
+        window_size=window_size,
+        num_features=num_features,
+        sample_count=sample_count,
+    )
+
+    # Level 5: SplitData
+    split_data_node = build_split_data_node(
+        preprocessed_data_node=preprocessed_data_node,
+        test_size=test_size,
+        train_samples=train_samples,
+        val_samples=val_samples,
+    )
+
+    # Level 6: TrainedModel (root)
+    weights_hash = compute_weights_hash(model_state_dict)
+    root = build_trained_model_node(
+        split_data_node=split_data_node,
+        weights_hash=weights_hash,
+        metrics=metrics,
+        training_config=training_config,
+        model_type=model_type,
+        version=version,
+    )
+
+    root.compute_hash()
+    return root

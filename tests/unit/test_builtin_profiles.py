@@ -216,16 +216,19 @@ class TestSPS30Profile:
 
 class TestEPAAQIStandard:
     def test_name(self):
-        from app.builtin_profiles import EPAAQIStandard
-        s = EPAAQIStandard()
+        import app.builtin_profiles  # noqa: F401
+        from app.profiles import _STANDARD_REGISTRY
+        s = _STANDARD_REGISTRY["epa_aqi"]()
         assert s.name == "epa_aqi"
 
     def test_categories_count(self):
-        from app.builtin_profiles import EPAAQIStandard
-        s = EPAAQIStandard()
+        import app.builtin_profiles  # noqa: F401
+        from app.profiles import _STANDARD_REGISTRY
+        s = _STANDARD_REGISTRY["epa_aqi"]()
         assert len(s.categories) == 6
 
     def test_target_column(self):
-        from app.builtin_profiles import EPAAQIStandard
-        s = EPAAQIStandard()
+        import app.builtin_profiles  # noqa: F401
+        from app.profiles import _STANDARD_REGISTRY
+        s = _STANDARD_REGISTRY["epa_aqi"]()
         assert s.target_column == "aqi"

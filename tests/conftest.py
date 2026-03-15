@@ -13,8 +13,8 @@ def bme680_profile():
 @pytest.fixture
 def bsec_standard():
     import app.builtin_profiles  # noqa: F401
-    from app.builtin_profiles import BSECStandard
-    return BSECStandard()
+    from app.profiles import get_iaq_standard
+    return get_iaq_standard()
 
 
 @pytest.fixture

@@ -161,6 +161,8 @@ class FailureInfo:
     failed_state: PipelineState
     error: Exception
     stage_results: List[StageResult]
+    error_code: Optional[str] = None
+    suggestion: Optional[str] = None
 
 
 @dataclass
@@ -176,6 +178,15 @@ class PipelineResult:
     merkle_root_hash: str = ""
     artifact_paths: List[Path] = field(default_factory=list)
     interrupted: bool = False
+
+    @property
+    def warnings(self) -> List[str]:
+        """Surface preprocessing warnings as a flat string list."""
+        return [
+            f"[{issue.stage}] {issue.message}"
+            + (f" ({issue.rows_affected} rows)" if issue.rows_affected else "")
+            for issue in self.preprocessing_report.warnings
+        ]
 
 
 class PipelineError(Exception):
@@ -359,15 +370,38 @@ class TrainingPipeline:
             exc_info=True,
         )
         self._state = PipelineState.FAILED
+        error_code, suggestion = self._classify_error(state, error)
         info = FailureInfo(
             failed_state=state,
             error=error,
             stage_results=list(self._stage_results),
+            error_code=error_code,
+            suggestion=suggestion,
         )
         self._failure = info
         for cb in self._on_error_callbacks:
             cb(info)
         return info
+
+    @staticmethod
+    def _classify_error(
+        state: PipelineState, error: Exception
+    ) -> tuple:
+        """Infer a domain error code and recovery suggestion from failure context."""
+        msg = str(error).lower()
+        if "no data" in msg or "empty" in msg:
+            return "NO_DATA", "Widen time range or check measurement name"
+        if "insufficient" in msg or "too few" in msg:
+            return "INSUFFICIENT_DATA", "Use smaller window or different model type"
+        if "schema" in msg or "feature" in msg and "mismatch" in msg:
+            return "SCHEMA_MISMATCH", "Retrain or check field mapping"
+        if "nan" in msg or "inf" in msg or "diverge" in msg:
+            return "TRAINING_DIVERGED", "Reduce learning rate"
+        if "checkpoint" in msg and "not found" in msg:
+            return "CHECKPOINT_NOT_FOUND", "Start fresh training (remove --resume)"
+        if "connect" in msg or "unreachable" in msg or "refused" in msg:
+            return "INFLUX_UNREACHABLE", "Check host/port/network"
+        return None, None
 
     # ── Stage implementations ──────────────────────────────────────────
 
@@ -973,6 +1007,7 @@ class TrainingPipeline:
             metrics=self._metrics,
             training_history=self._training_history,
             data_manifest=manifest,
+            feature_names=self._sensor_profile.all_feature_names,
         )
 
         # Compute schema fingerprint for semver
@@ -982,6 +1017,7 @@ class TrainingPipeline:
             window_size=self._window_size,
             num_features=self._sensor_profile.total_features,
             model_type=self._model_type,
+            feature_names=self._sensor_profile.all_feature_names,
         )
         schema_fp = self._schema_fp
 

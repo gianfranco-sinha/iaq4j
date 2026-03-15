@@ -89,6 +89,11 @@ class SensorProfile(ABC):
         return None
 
     @property
+    def expected_interval_seconds(self) -> Optional[float]:
+        """Expected sampling interval in seconds. None = skip check."""
+        return None
+
+    @property
     @abstractmethod
     def engineered_feature_names(self) -> List[str]:
         """Names of derived features appended after raw columns."""

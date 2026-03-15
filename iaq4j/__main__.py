@@ -89,6 +89,11 @@ def create_parser():
         type=str,
         help="Path to CSV file (required when --data-source csv)",
     )
+    train_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from last checkpoint",
+    )
 
     # List models command
     list_parser = subparsers.add_parser(
@@ -109,6 +114,72 @@ def create_parser():
         choices=["mlp", "kan", "lstm", "cnn", "bnn", "all"],
         default="all",
         help="Model type to verify (default: all)",
+    )
+
+    # Drift analysis command
+    drift_parser = subparsers.add_parser(
+        "drift-analysis",
+        help="Analyze sensor drift and seasonal variation from historical data",
+    )
+    drift_parser.add_argument(
+        "--hours-back",
+        type=int,
+        default=8760,
+        help="Hours of historical data to fetch (default: 8760 = 1 year)",
+    )
+    drift_parser.add_argument(
+        "--database",
+        type=str,
+        help="InfluxDB database name (default: from config)",
+    )
+    drift_parser.add_argument(
+        "--output-dir",
+        type=str,
+        help="Directory for CSV/JSON output (optional)",
+    )
+    drift_parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Generate PNG drift charts",
+    )
+    drift_parser.add_argument(
+        "--gap-threshold",
+        type=float,
+        default=1.0,
+        help="Gap detection threshold in hours (default: 1.0)",
+    )
+
+    # Drift correction evaluation command
+    drift_eval_parser = subparsers.add_parser(
+        "drift-correction-eval",
+        help="Evaluate drift correction impact on model accuracy",
+    )
+    drift_eval_parser.add_argument(
+        "--data-source",
+        choices=["synthetic", "influxdb"],
+        default="synthetic",
+        help="Data source for evaluation (default: synthetic)",
+    )
+    drift_eval_parser.add_argument(
+        "--database",
+        type=str,
+        help="InfluxDB database name (default: from config)",
+    )
+    drift_eval_parser.add_argument(
+        "--drift-summary",
+        type=str,
+        help="Path to drift_summary.json (default: results/drift_3yr/drift_summary.json)",
+    )
+    drift_eval_parser.add_argument(
+        "--output",
+        type=str,
+        help="Output JSON path (default: results/drift_correction_eval.json)",
+    )
+    drift_eval_parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=2000,
+        help="Number of synthetic samples (default: 2000)",
     )
 
     # Map fields command
@@ -276,6 +347,7 @@ def main():
                     window_size=args.window_size,
                     num_records=args.data_records,
                     data_source=data_source,
+                    resume=args.resume,
                 )
                 print(f"✅ {model_type.upper()} training completed successfully")
             except Exception as e:
@@ -359,6 +431,70 @@ def main():
         print("Available models in registry:")
         for model_type in MODEL_REGISTRY:
             print(f"  - {model_type}")
+
+    elif args.command == "drift-analysis":
+        import app.builtin_profiles  # noqa: F401
+        from app.profiles import get_iaq_standard, get_sensor_profile
+        from training.data_sources import InfluxDBSource
+        from training.drift_analysis import (
+            compute_moving_averages,
+            format_console_report,
+            plot_drift_charts,
+            save_drift_output,
+        )
+
+        profile = get_sensor_profile()
+        standard = get_iaq_standard()
+
+        # Features to analyze: raw sensor features + IAQ target
+        features = list(profile.raw_features) + [standard.target_column]
+
+        source = InfluxDBSource(
+            hours_back=args.hours_back,
+            database=args.database,
+        )
+
+        print(f"Connecting to {source.name}...")
+        try:
+            source.validate()
+        except Exception as e:
+            print(f"Failed to connect to InfluxDB: {e}")
+            sys.exit(1)
+
+        print(f"Fetching {args.hours_back}h of data...")
+        try:
+            df = source.fetch()
+        except Exception as e:
+            print(f"Failed to fetch data: {e}")
+            sys.exit(1)
+        finally:
+            source.close()
+
+        print(f"Analyzing {len(df):,} samples...")
+        report = compute_moving_averages(
+            df, features, gap_threshold_hours=args.gap_threshold
+        )
+        print(format_console_report(report))
+
+        if args.output_dir:
+            save_drift_output(report, args.output_dir)
+            print(f"Output saved to {args.output_dir}/")
+
+        if args.plot:
+            output_dir = args.output_dir or "drift_output"
+            plot_drift_charts(report, output_dir)
+            print(f"Charts saved to {output_dir}/")
+
+    elif args.command == "drift-correction-eval":
+        from training.drift_correction_eval import run_evaluation
+
+        run_evaluation(
+            data_source=args.data_source,
+            drift_summary_path=args.drift_summary,
+            output_path=args.output,
+            num_samples=args.num_samples,
+            database=args.database,
+        )
 
     elif args.command == "map-fields":
         import app.builtin_profiles  # noqa: F401

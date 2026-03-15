@@ -18,17 +18,64 @@ above it are fully complete (all checkboxes ticked).
 | 3 | ~~**Pytest Suite — Tier 1**~~ ✅ (168 tests) | P0 | Pure core: quantities, profiles, windowing, merkle, schemas. No mocking needed. |
 | 4 | ~~**Training Checkpoint & Resume**~~ ✅ | P1 | Training on real data takes 6–16h per model. Graceful SIGINT/SIGTERM, periodic checkpoint, `--resume` CLI flag. |
 | 5 | ~~**Pytest Suite — Tier 2**~~ ✅ (98 tests, 266 total) | P1 | Model forward passes, config merging, pipeline e2e with SyntheticSource, profile IO resolution. No bugs uncovered — all application code behaved correctly. |
-| 6 | **MLflow Integration** (tracing + remaining) | P1 | Completes observability. `mlflow_tracer.py` adapter subscribes to pipeline/inference callbacks — no MLflow imports in core. MCP tool calls produce full trace trees. Required before MCP server so agent-triggered runs are fully auditable. |
-| 7 | **LLM Readiness — Phase 1** (structured internals) | P1 | Plumbing prerequisite for all agent work: config cache, InfluxDB reads, typed exceptions, `StructuredResponse`. No user-facing changes. |
-| 8 | **MCP Server** | P1 | Expose all agent-facing capabilities as MCP tools. Replaces LLM Readiness Phase 2 (REST tool surface) and LLM Agent (custom orchestrator). Depends on Phase 1. |
-| 9 | **Pytest Suite — Tier 3** (IO/mocked) | P2 | Inference engine, field mapper, data sources, train_model integration. ~100 tests, needs mocking. |
-| 10 | **MCP Pipeline Design Tools** | P2 | MCP tools for sensor inventory, pipeline spec design/validate/commit. Replaces LLM Readiness Phase 3. |
-| 11 | **LLM-Driven Pipeline Design** | P2 | LLM as full pipeline designer (feature engineering + model selection). Depends on MCP Server + Pipeline Design Tools. |
+| 6 | ~~**DAG Merkle Tree**~~ ✅ | P1 | Small + self-contained (merkle.py + tests only). Prerequisite for multi-source pipeline. Done while structure is simple — delaying means any multi-source work has to retrofit. |
+| 7 | **Domain Exception Hierarchy** (R1) | P1 | Unifies 3 competing error patterns (structured exception, error dict, boolean flag) into one `IAQError` hierarchy with `DomainErrorCode` attached at origin. Small, self-contained, no pipeline.py changes. Prerequisite for Phase 1 typed exceptions. See `docs/architecture_appraisal.md`. |
+| 8 | **Ingestion Consistency Validation** (datetime & units) | P1 | Pipeline ingestion has no timezone normalization, no unit detection/conversion, and no sampling interval checks. Mixed timestamp formats crashed InfluxDB DataFrameClient; kOhm vs Ohm VOC data passes range validation silently. Must be settled before multi-source pipeline adds more data sources with varying formats. Uses existing `quantities.py:convert_to_canonical()` and `SensorProfile.feature_units`. |
+| 9 | **Config Decomposition** (R2) | P1 | Split `Settings` god object (282 LOC) into `ModelSettings`, `DatabaseSettings`, `SensorSettings`. Fix domain→infrastructure dependency inversion in `profiles.py`, `schemas.py`, `pipeline.py`. Unblocks clean DI for services (#10). See `docs/architecture_appraisal.md`. |
+| 10 | **Service Extraction** (R3) | P1 | Extract `PredictionService` from `main.py` to own 4 mutable globals (`predictors`, `inference_engines`, `active_model`, `_pending_mappings`). Extract `SensorRegistrationService` from 90+ lines of route-level field mapping logic. Enables thread safety and testability. See `docs/architecture_appraisal.md`. |
+| 11 | **LLM Readiness — Phase 1** (structured internals) | P1 | Plumbing prerequisite for all agent work: config cache, InfluxDB reads, typed exceptions (now uses R1 hierarchy), `StructuredResponse`. No pipeline.py changes. Unblocks MCP. |
+| 12 | **Multi-source Pipeline** | P1 | Depends on DAG Merkle tree (#6). Touches pipeline.py ingestion path once — doing it now while pipeline.py is stable means one rework, not two. |
+| 13 | **Label Studio DB Integration** | P1 | Export InfluxDB data into Label Studio for annotation. Uses existing `InfluxDBSource` reads + Label Studio import API. Self-contained CLI command + new module, no pipeline.py changes. |
+| 14 | **MCP Server** | P1 | Expose all agent-facing capabilities as MCP tools. Depends on Phase 1 (#11). Pipeline is now stable (ingestion settled by #12). |
+| 15 | **Model Factory Registry** (R4) | P2 | Replace `build_model()` if/elif chain with declarative factory dict. Small, self-contained. See `docs/architecture_appraisal.md`. |
+| 16 | **Data Source Registry** (R5) | P2 | Add registry + factory for data sources (mirrors sensor registry pattern). Remove CLI string matching. Enables plugin-style data source addition. See `docs/architecture_appraisal.md`. |
+| 17 | **MLflow Integration** (tracing + remaining) | P2 | Adds training callbacks to the *final* pipeline shape — no rework needed. Demoted: observability is valuable but not blocking any downstream features. |
+| 18 | **Pytest Suite — Tier 3** (IO/mocked) | P2 | Covers multi-source ingestion, Label Studio export, MCP tools, MLflow hooks, inference engine. More valuable after those features exist. ~100 tests, needs mocking. |
+| 19 | **MCP Pipeline Design Tools** | P2 | Can reason about multiple sources (depends on #12). MCP tools for sensor inventory, pipeline spec design/validate/commit. Replaces LLM Readiness Phase 3. |
+| 20 | **LLM-Driven Pipeline Design** | P2 | Capstone. Depends on MCP Server + Pipeline Design Tools + multi-source. LLM as full pipeline designer (feature engineering + model selection). |
+
+**Dependency graph:**
+```
+DAG Merkle Tree (done) ─┐
+                        ├──→ Ingestion Consistency (#8) ──→ Multi-source Pipeline (#12) ─┐
+                        │                                                                 │
+Domain Exception Hierarchy (#7) ─┐                                                       │
+                                 │                                                        │
+Config Decomposition (#9) ───────┤                                                        │
+                                 │                                                        │
+Service Extraction (#10) ────────┤                                                        │
+                                 │                                                        │
+                                 └──→ LLM Readiness Phase 1 (#11)                         │
+                                              │                                           │
+                                              ├──→ MCP Server (#14)                       │
+                                              │         │                                 │
+                                              │         ├──→ MCP Pipeline Design (#19) ←──┘
+                                              │         │              │
+                                              │         │              └──→ LLM-Driven Design (#20)
+                                              │         │
+Label Studio DB Integration (#13) ← independent
+MLflow Integration (#17)          ← independent, P2
+Model Factory Registry (#15)      ← independent, P2
+Data Source Registry (#16)        ← before Multi-source Pipeline (#12) ideally
+Pytest Tier 3 (#18) (covers all above)
+```
+
+**Key ordering rationale:**
+- **Exception hierarchy before Phase 1**: Phase 1 specifies "typed exceptions" — R1 provides the hierarchy that Phase 1 populates. Small, self-contained, no conflicts.
+- **Config decomposition before Phase 1**: Phase 1 adds config cache invalidation. Refactoring Settings first means Phase 1 caches are added to the right classes, not retrofitted later.
+- **Service extraction before Phase 1**: Phase 1 adds InfluxDB read queries. Extracting services first means the queries are added to a service, not another global singleton.
+- **R1→R2→R3 sequence**: Exception hierarchy is leaf (no deps). Config decomposition depends on knowing the error types. Service extraction uses the decomposed config.
+- **Ingestion consistency before multi-source**: Multi-source pipeline adds CSV, Label Studio, and external API sources — each with different timestamp formats and unit conventions. Timezone normalization and unit detection must be in the ingestion path *before* more sources are wired in.
+- **Phase 1 before multi-source**: Phase 1 doesn't touch pipeline.py. Multi-source does. No conflict, and Phase 1 can proceed in parallel conceptually.
+- **Multi-source before MLflow**: Both touch pipeline.py but different areas (ingestion vs training callbacks). Doing multi-source first settles the pipeline shape. MLflow then writes hooks against the final structure — zero rework.
+- **Label Studio DB after multi-source**: Can leverage any multi-source infrastructure but is otherwise self-contained. No hard dependency.
+- **MLflow demoted to P2**: Not blocking any downstream features. Adding callbacks to a stable pipeline is additive work whenever it's picked up.
+- **R4/R5 at P2**: `build_model()` if/elif and data source string matching work fine today. Closing them is clean-up, not urgent.
 
 **Superseded items (replaced by MCP):**
-- ~~LLM Readiness — Phase 2~~ → replaced by MCP Server (item 6)
-- ~~LLM Agent~~ → replaced by MCP Server (item 6) — no custom agent loop needed; MCP clients (Claude Desktop, Claude Code) provide the orchestration layer
-- ~~LLM Readiness — Phase 3~~ → replaced by MCP Pipeline Design Tools (item 7)
+- ~~LLM Readiness — Phase 2~~ → replaced by MCP Server (item 14)
+- ~~LLM Agent~~ → replaced by MCP Server (item 14) — no custom agent loop needed; MCP clients (Claude Desktop, Claude Code) provide the orchestration layer
+- ~~LLM Readiness — Phase 3~~ → replaced by MCP Pipeline Design Tools (item 19)
 
 **Parked (no fixed order):**
 - Artifact Versioning remaining (dataset semver, migration guide) — pick up opportunistically
@@ -127,6 +174,74 @@ lineage system so that artifact consumers can reason about compatibility.
 - [x] CLI support: `python -m iaq4j version` to show current active model versions
 - [x] Warn (not reject) loading a model whose schema fingerprint doesn't match the serving code's expected schema
 - [ ] Migration guide when MAJOR bump occurs (what changed, how to retrain)
+
+---
+
+## DAG Merkle Tree — ✅ DONE
+
+### Directed acyclic graph provenance for multi-source training — P1
+
+**Previous state:** Linear 6-level Merkle chain (Sensor → RawData → CleansedData → ... → TrainedModel). Only one data source per training run.
+
+**Goal:** Support multiple data sources (sensor + external AQ APIs + weather APIs) feeding into one training run with faithful provenance tracking.
+
+**Changes (all in `training/merkle.py`):**
+
+- [x] `build_cleansed_data_node` accepts `Union[MerkleNode, List[MerkleNode]]` — single node auto-wrapped in list; identical hash for single-source trees (backward compat)
+- [x] `build_external_source_node` — new leaf node for non-sensor sources (`source_name`, `source_url`, `api_version`, optional `extra` metadata dict)
+- [x] `_diff_recursive` — child matching by hash first, then node_type; reports `+type`/`-type` for added/removed children
+- [x] Module docstring — updated ASCII art to show DAG structure
+- [x] Tests — `TestBuildExternalSourceNode`, `TestMultiSourceDAG`, `TestDiffDAG` in `tests/unit/test_merkle.py` (46 tests total, all passing)
+
+**Not changed:** MerkleNode, other builders, verify, serialization, pipeline.py.
+
+---
+
+## Multi-source Pipeline
+
+### Pipeline support for multiple data sources in one training run — P1
+
+**Depends on:** DAG Merkle Tree (done). Done before MLflow so pipeline.py ingestion is settled before training callbacks are added — avoids rework.
+
+**Goal:** Allow `TrainingPipeline` to ingest data from multiple sources (e.g., BME680 sensor + OpenWeather API + PurpleAir API) and merge them into a single training dataset with full provenance tracking via the DAG Merkle tree.
+
+**Requirements:**
+
+- [ ] `DataSource` ABC extended with `source_type` property for Merkle node building
+- [ ] `TrainingPipeline` accepts `List[DataSource]` — fetches each, merges DataFrames by timestamp
+- [ ] Merge strategy: outer join on DatetimeIndex, forward-fill external sources (lower sample rate)
+- [ ] Each source gets its own `build_raw_data_node` subtree; all feed into `build_cleansed_data_node`
+- [ ] `ExternalAPISource` — new `DataSource` subclass for generic REST API data (URL, auth, field mapping)
+- [ ] Config: `data_sources` list in `model_config.yaml` replaces single `data_source` key
+- [ ] CLI: `python -m iaq4j train --model mlp --data-source influxdb,openweather`
+
+---
+
+## Label Studio DB Integration
+
+### Export InfluxDB data to Label Studio for annotation — P1
+
+**Depends on:** None (uses existing `InfluxDBSource`). Complements existing `LabelStudioDataSource` (which imports *from* Label Studio).
+
+**Goal:** Push raw sensor data from InfluxDB into Label Studio as annotation tasks, optionally pre-annotated with model predictions. Enables human-in-the-loop data curation: annotators review IAQ readings, correct labels, flag anomalies. Corrected data flows back via the existing `LabelStudioDataSource` for retraining.
+
+**Data flow:**
+```
+InfluxDB → export tool → Label Studio tasks (with optional pre-annotations)
+                                    ↓
+                          Human annotators review/correct
+                                    ↓
+                    LabelStudioDataSource (existing) → retrain
+```
+
+**Requirements:**
+
+- [ ] `training/label_studio_export.py` — new module: query InfluxDB, format as Label Studio import JSON, push via `/api/projects/{id}/import`
+- [ ] Pre-annotation support: if trained model exists, run inference on exported data and include predictions as pre-annotations (annotators correct rather than label from scratch)
+- [ ] Configurable export window: time range, measurement, filters (e.g. `iaq_accuracy >= 2`)
+- [ ] Label Studio project template: define labeling interface (IAQ value correction, anomaly flagging, reject/approve)
+- [ ] CLI: `python -m iaq4j export --target labelstudio --project-id <id> [--hours-back 24] [--pre-annotate]`
+- [ ] Idempotent: skip tasks already imported (match by timestamp or task ID)
 
 ---
 
@@ -1569,5 +1684,168 @@ FeatureExtractor  FeatureExtractor
 - [ ] CLI: `python -m iaq4j design-pipeline` command
 - [ ] Existing `BME680Profile` features ported to a reference `PipelineSpec` YAML as first example
 - [ ] `--model` CLI flag overrides LLM recommendation when explicitly provided
+
+---
+
+## Architectural Remediation
+
+### Formal appraisal: `docs/architecture_appraisal.md` (2026-03-12)
+
+Full audit across extensibility, DDD adherence, error taxonomy, and state management.
+Property-based test suite added (29 Hypothesis tests, 358 total).
+Shape assertions added to CNN/LSTM forward passes.
+
+The five remediation items below address the structural weaknesses identified.
+
+---
+
+### R1: Domain Exception Hierarchy — P1
+
+**Problem:** Three competing error patterns — structured exceptions in pipeline,
+error dicts in models, boolean flags in database. `DomainErrorCode` enum defined
+but only populated in API handlers, not at the point where errors originate.
+`_classify_error()` in pipeline reverse-engineers error codes from exception
+message strings.
+
+**Goal:** Single `IAQError` base exception with `DomainErrorCode` attached. All
+domain/training code raises typed exceptions. API handlers catch and map to
+`StructuredResponse`. `_classify_error()` becomes unnecessary.
+
+**Files to modify:**
+
+| File | Change |
+|---|---|
+| `app/exceptions.py` (new) | `IAQError(Exception)` base + 6 subtypes matching `DomainErrorCode` |
+| `training/pipeline.py` | Replace generic `Exception` catches with typed `IAQError` subtypes; remove `_classify_error()` |
+| `app/models.py` | `IAQPredictor.predict()` raises `FeatureEngineeringError` instead of returning error dict |
+| `app/database.py` | `InfluxDBManager` raises `InfluxUnreachableError` instead of setting boolean flag |
+| `app/main.py` | Exception handler catches `IAQError` subtypes, maps `.code` to `StructuredResponse` |
+| `app/schemas.py` | No change — `DomainErrorCode` enum already exists |
+
+**Requirements:**
+
+- [ ] `app/exceptions.py`: `IAQError(code, suggestion=None)` base class
+- [ ] Subtypes: `NoDataError`, `InsufficientDataError`, `SchemaMismatchError`, `TrainingDivergedError`, `InfluxUnreachableError`, `CheckpointNotFoundError`
+- [ ] `training/pipeline.py`: stages raise typed exceptions; `FailureInfo.error_code` populated from `exc.code`
+- [ ] `training/pipeline.py`: remove `_classify_error()` static method
+- [ ] `app/models.py`: `predict()` raises instead of returning `{"status": "error"}`
+- [ ] `app/database.py`: `InfluxDBManager` connection methods raise `InfluxUnreachableError`
+- [ ] `app/main.py`: global handler catches `IAQError`, maps to `StructuredResponse`
+- [ ] Tests: verify each subtype carries correct `DomainErrorCode`
+
+**Effort:** Small (~2h). Self-contained, no pipeline shape changes.
+
+---
+
+### R2: Config Decomposition — P1
+
+**Problem:** `Settings` in `app/config.py` (282 LOC) is a god object owning API
+settings, model paths, database config, YAML loading, sensor identity, and caching.
+Domain modules (`profiles.py`, `schemas.py`) import it directly — violating DDD
+dependency direction (domain should not depend on infrastructure).
+
+**Goal:** Split into focused config classes. Domain factories accept parameters
+instead of importing the singleton. Config is passed down from composition root
+(`main.py`, CLI entry points), not pulled from a global.
+
+**Files to modify:**
+
+| File | Change |
+|---|---|
+| `app/config.py` | Split into `AppSettings`, `ModelSettings`, `DatabaseSettings`, `SensorSettings` |
+| `app/profiles.py` | `get_sensor_profile(sensor_type=None)` — optional param, config fallback only when None |
+| `app/schemas.py` | `SensorReading._build_readings()` receives `field_mapping` via class-level config, not runtime import |
+| `training/pipeline.py` | `TrainingPipeline.__init__()` accepts settings as parameter |
+| `app/main.py` | Composition root: instantiates config, passes to services |
+| `iaq4j/__main__.py` | CLI composition root: same pattern |
+
+**Requirements:**
+
+- [ ] `ModelSettings`: model paths, YAML loading, model-specific config, `get_model_config()`
+- [ ] `DatabaseSettings`: InfluxDB connection, read/write config
+- [ ] `SensorSettings`: sensor type, field mapping, sensor identity
+- [ ] `AppSettings`: API host/port, root path, API key — thin, no YAML
+- [ ] `settings` singleton retained for backward compat but delegates to sub-settings
+- [ ] `get_sensor_profile(sensor_type: str = None)` — accepts explicit type, falls back to config
+- [ ] `get_iaq_standard(standard_type: str = None)` — same pattern
+- [ ] `TrainingPipeline.__init__(settings=None)` — accepts settings, defaults to global
+- [ ] No functional change — all existing behavior preserved
+
+**Effort:** Medium (~4h). Touch many files but each change is mechanical.
+
+---
+
+### R3: Service Extraction from main.py — P1
+
+**Problem:** `app/main.py` has 4 module-level mutable variables (`predictors`,
+`inference_engines`, `active_model`, `_pending_mappings`). `active_model` is
+mutated via `global` keyword in a route handler. Not thread-safe. 90+ lines of
+field mapping business logic lives in route handlers instead of a service.
+
+**Goal:** Extract `PredictionService` and `SensorRegistrationService`. Route
+handlers become thin adapters that delegate to service methods. State lives in
+service instances, not module globals.
+
+**Files to modify:**
+
+| File | Change |
+|---|---|
+| `app/prediction_service.py` (new) | `PredictionService` — owns `predictors`, `inference_engines`, `active_model` |
+| `app/sensor_registration_service.py` (new) | `SensorRegistrationService` — owns `_pending_mappings`, field mapping logic |
+| `app/main.py` | Routes delegate to service instances; lifespan creates services |
+
+**Requirements:**
+
+- [ ] `PredictionService.__init__(settings)`: loads models, creates predictors + inference engines
+- [ ] `PredictionService.predict(reading, model_type=None)`: uses active or specified model
+- [ ] `PredictionService.select_model(model_type)`: validates + switches active model
+- [ ] `PredictionService.list_models()`: returns available models with status
+- [ ] `SensorRegistrationService.propose_mapping(payload)`: returns mapping proposal with ID
+- [ ] `SensorRegistrationService.confirm_mapping(mapping_id)`: persists to config
+- [ ] `app/main.py` lifespan: `prediction_svc = PredictionService(settings)`
+- [ ] All route handlers: 3-5 lines max (parse request → call service → return response)
+- [ ] `_pending_mappings` TTL: proposals expire after configurable timeout (default 30min)
+
+**Effort:** Medium (~4h). Main.py gets shorter, services are independently testable.
+
+---
+
+### R4: Model Factory Registry — P2
+
+**Problem:** `build_model()` in `app/models.py:305` is a 50-line if/elif chain.
+Each new model type requires a new branch with model-specific parameter extraction.
+
+**Goal:** Replace with declarative factory dict. Adding a model requires only
+adding an entry to the dict.
+
+**Requirements:**
+
+- [ ] `_MODEL_FACTORIES: Dict[str, Callable]` mapping model type to constructor wrapper
+- [ ] Each wrapper reads its params from config: `lambda cfg, ws, nf: MLPRegressor(input_dim=ws*nf, ...)`
+- [ ] `build_model()` becomes 3 lines: lookup → extract config → call factory
+- [ ] `MODEL_REGISTRY` retained for backward compat (used in `IAQPredictor.load_model()`)
+
+**Effort:** Small (~1h). Self-contained change to `app/models.py`.
+
+---
+
+### R5: Data Source Registry — P2
+
+**Problem:** Data source selection in CLI uses string matching:
+`if data_source == "synthetic": source = SyntheticSource()`. No registry analogous
+to the sensor/standard registries. Adding a new data source requires editing CLI code.
+
+**Goal:** Registry + factory pattern matching the sensor registry. CLI uses registry
+lookup. New sources register themselves at import time.
+
+**Requirements:**
+
+- [ ] `_DATA_SOURCE_REGISTRY: Dict[str, type]` in `training/data_sources.py`
+- [ ] `register_data_source(name, cls)` and `get_data_source(name, **kwargs)` factory
+- [ ] Built-in sources register at module level: `register_data_source("synthetic", SyntheticSource)`
+- [ ] CLI: `source = get_data_source(args.data_source, **source_kwargs)`
+- [ ] `python -m iaq4j list-sources` command to show registered data sources
+
+**Effort:** Small (~1h). Mirrors existing sensor registry pattern.
 
 ---

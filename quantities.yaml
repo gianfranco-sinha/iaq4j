@@ -132,3 +132,19 @@ epa_aqi:
   kind: iaq_standard
   aliases: ["aqi", "epa", "air_quality_index"]
   alternate_units: {}
+
+iaqi:
+  canonical_unit: "index"
+  description: "Indoor Air Quality Index (0-100, higher is better)"
+  valid_range: [0, 100]
+  kind: iaq_standard
+  aliases: ["indoor_aqi", "atmotube_iaqi"]
+  alternate_units: {}
+
+reset_air:
+  canonical_unit: "%"
+  description: "RESET Air Standard score (0-100%, higher is better)"
+  valid_range: [0, 100]
+  kind: iaq_standard
+  aliases: ["reset", "reset_air_score"]
+  alternate_units: {}

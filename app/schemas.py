@@ -1,6 +1,7 @@
 # ============================================================================
 # File: app/schemas.py
 # ============================================================================
+from enum import Enum
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
@@ -202,6 +203,56 @@ class ModelSelection(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Structured response envelope (LLM Readiness Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class DomainErrorCode(str, Enum):
+    """Domain-specific error codes for programmatic error handling."""
+
+    NO_DATA = "NO_DATA"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
+    INFLUX_UNREACHABLE = "INFLUX_UNREACHABLE"
+    TRAINING_DIVERGED = "TRAINING_DIVERGED"
+    NEGATIVE_R2 = "NEGATIVE_R2"
+    STALE_CONFIG = "STALE_CONFIG"
+    CHECKPOINT_NOT_FOUND = "CHECKPOINT_NOT_FOUND"
+
+
+class StructuredResponse(BaseModel):
+    """Unified response envelope for REST endpoints and MCP tools.
+
+    Every endpoint wraps its result in this envelope so that callers
+    (human or LLM agent) get a consistent schema with actionable
+    error information.
+    """
+
+    status: str = Field(
+        ...,
+        description="success | warning | partial | error | fatal",
+    )
+    result: Optional[Any] = Field(None, description="Payload on success")
+    warnings: List[str] = Field(default_factory=list)
+    error_code: Optional[str] = Field(
+        None, description="DomainErrorCode value on failure"
+    )
+    detail: Optional[str] = Field(None, description="Human-readable error detail")
+    context: Dict[str, Any] = Field(
+        default_factory=dict, description="Extra structured context"
+    )
+    next_steps: List[str] = Field(
+        default_factory=list,
+        description="Concrete recovery suggestions the caller can act on",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sensor registration (field mapping API)
+# ---------------------------------------------------------------------------
+
+
 class SensorRegisterRequest(BaseModel):
     """Request body for POST /sensors/register."""
 
@@ -254,3 +305,45 @@ class SensorConfirmResponse(BaseModel):
     field_mapping: Dict[str, str]
     sensor_id: Optional[str] = None
     firmware_version: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Per-sensor drift report
+# ---------------------------------------------------------------------------
+
+
+class FeatureDriftStats(BaseModel):
+    """Per-feature drift statistics."""
+
+    mean: float
+    std: float
+    min: float
+    max: float
+    cv: float = Field(description="Coefficient of variation")
+    estimated_drift: Optional[float] = Field(
+        None, description="Estimated total drift = slope * sensor_age_days"
+    )
+    estimated_drift_pct: Optional[float] = Field(
+        None, description="Estimated drift as % of mean"
+    )
+    drift_status: str = Field(description="OK | DRIFT | unknown")
+
+
+class SensorDriftReport(BaseModel):
+    """Drift report for a specific sensor device.
+
+    Uses the BME680 3-year drift profile as the canonical drift model
+    for all BME680 sensors. This assumption will be validated as more
+    sensor units are deployed.
+    """
+
+    sensor_id: str
+    sensor_start: str = Field(description="Sensor install date (from drift summary)")
+    first_reading: str = Field(description="ISO timestamp of first observed reading")
+    last_reading: str = Field(description="ISO timestamp of most recent reading")
+    sensor_age_days: float
+    readings_count: int = Field(description="Total readings received (lifetime)")
+    readings_in_window: int = Field(description="Readings in current rolling window")
+    features: Dict[str, FeatureDriftStats]
+    warnings: List[str]
+    health: str = Field(description="good | warning | drift")
